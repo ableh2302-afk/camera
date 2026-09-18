@@ -80,7 +80,6 @@ class _HomePageState extends State<HomePage>
   bool _settingsOpen = false;
   bool _excelMenuOpen = false;
   bool _numberEditorOpen = false;
-  bool _statusPanelOpen = false;
 
   FlashMode _flashMode = FlashMode.off;
 
@@ -95,14 +94,7 @@ class _HomePageState extends State<HomePage>
   ResolutionPreset _resolutionPreset =
       ResolutionPreset.high;
 
-  String _aspectRatio = '4:3';
-
-  String _storagePath =
-      '/storage/emulated/0/Dokumentasi Barang Pecah';
-
-  Set<String> _documentedNumbers = <String>{};
-
-  String _lastPhotoPath = '';
+  File? _latestPhoto;
 
   @override
   void initState() {
@@ -119,17 +111,34 @@ class _HomePageState extends State<HomePage>
   ) {
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused) {
-      _disposeCameraOnly();
-    } else if (state == AppLifecycleState.resumed) {
+      final camera = _camera;
+
+      if (camera != null) {
+        camera.dispose();
+
+        if (mounted) {
+          setState(() {
+            _camera = null;
+          });
+        }
+      }
+    }
+
+    if (state == AppLifecycleState.resumed) {
       _initializeCamera();
+      _loadLatestPhoto();
     }
   }
 
   Future<void> _initialize() async {
     await _requestPermissions();
+
     await _loadDatabase();
+
     await _loadSettings();
-    await _scanDocumentedPhotos();
+
+    await _loadLatestPhoto();
+
     await _initializeCamera();
 
     if (mounted) {
@@ -151,59 +160,72 @@ class _HomePageState extends State<HomePage>
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
 
-    final resolution =
+    final savedResolution =
         prefs.getString('camera_resolution');
 
-    switch (resolution) {
-      case 'low':
-        _resolutionPreset = ResolutionPreset.low;
-        break;
-      case 'medium':
-        _resolutionPreset = ResolutionPreset.medium;
-        break;
-      case 'veryHigh':
-        _resolutionPreset = ResolutionPreset.veryHigh;
-        break;
-      case 'max':
-        _resolutionPreset = ResolutionPreset.max;
-        break;
-      case 'high':
-      default:
-        _resolutionPreset = ResolutionPreset.high;
+    if (savedResolution != null) {
+      _resolutionPreset =
+          _resolutionFromString(savedResolution);
     }
-
-    _aspectRatio =
-        prefs.getString('camera_aspect_ratio') ?? '4:3';
   }
 
-  Future<void> _saveSettings() async {
+  Future<void> _saveResolution(
+    ResolutionPreset preset,
+  ) async {
     final prefs = await SharedPreferences.getInstance();
 
     await prefs.setString(
       'camera_resolution',
-      _resolutionName(_resolutionPreset),
-    );
-
-    await prefs.setString(
-      'camera_aspect_ratio',
-      _aspectRatio,
+      _resolutionToString(preset),
     );
   }
 
-  String _resolutionName(ResolutionPreset preset) {
+  String _resolutionToString(
+    ResolutionPreset preset,
+  ) {
     switch (preset) {
       case ResolutionPreset.low:
         return 'low';
+
       case ResolutionPreset.medium:
         return 'medium';
+
       case ResolutionPreset.high:
         return 'high';
+
       case ResolutionPreset.veryHigh:
         return 'veryHigh';
+
       case ResolutionPreset.ultraHigh:
         return 'ultraHigh';
+
       case ResolutionPreset.max:
         return 'max';
+    }
+  }
+
+  ResolutionPreset _resolutionFromString(
+    String value,
+  ) {
+    switch (value) {
+      case 'low':
+        return ResolutionPreset.low;
+
+      case 'medium':
+        return ResolutionPreset.medium;
+
+      case 'veryHigh':
+        return ResolutionPreset.veryHigh;
+
+      case 'ultraHigh':
+        return ResolutionPreset.ultraHigh;
+
+      case 'max':
+        return ResolutionPreset.max;
+
+      case 'high':
+      default:
+        return ResolutionPreset.high;
     }
   }
 
@@ -212,17 +234,22 @@ class _HomePageState extends State<HomePage>
   ) {
     switch (preset) {
       case ResolutionPreset.low:
-        return 'Rendah';
+        return 'LOW';
+
       case ResolutionPreset.medium:
-        return 'Sedang';
+        return 'MEDIUM';
+
       case ResolutionPreset.high:
-        return 'Tinggi';
+        return 'HIGH';
+
       case ResolutionPreset.veryHigh:
-        return 'Sangat Tinggi';
+        return 'VERY HIGH';
+
       case ResolutionPreset.ultraHigh:
-        return 'Ultra';
+        return 'ULTRA HIGH';
+
       case ResolutionPreset.max:
-        return 'Maksimal';
+        return 'MAX';
     }
   }
 
@@ -253,9 +280,18 @@ class _HomePageState extends State<HomePage>
       final maxZoom =
           await controller.getMaxZoomLevel();
 
-      try {
-        await controller.setFlashMode(_flashMode);
-      } catch (_) {}
+      await controller.setFlashMode(
+        _flashMode,
+      );
+
+      final safeZoom = _zoom.clamp(
+        minZoom,
+        maxZoom,
+      );
+
+      await controller.setZoomLevel(
+        safeZoom.toDouble(),
+      );
 
       if (!mounted) {
         await controller.dispose();
@@ -268,18 +304,10 @@ class _HomePageState extends State<HomePage>
         _camera = controller;
         _minZoom = minZoom;
         _maxZoom = maxZoom;
-
-        _zoom = math.max(
-          minZoom,
-          math.min(_zoom, maxZoom),
-        );
+        _zoom = safeZoom.toDouble();
       });
 
       await oldCamera?.dispose();
-
-      try {
-        await controller.setZoomLevel(_zoom);
-      } catch (_) {}
     } catch (e) {
       await controller.dispose();
 
@@ -291,15 +319,34 @@ class _HomePageState extends State<HomePage>
     }
   }
 
-  Future<void> _disposeCameraOnly() async {
-    final camera = _camera;
+  Future<void> _changeResolution(
+    ResolutionPreset preset,
+  ) async {
+    if (_resolutionPreset == preset) {
+      return;
+    }
 
-    _camera = null;
+    setState(() {
+      _resolutionPreset = preset;
+      _settingsOpen = false;
+    });
 
-    await camera?.dispose();
+    await _saveResolution(preset);
+
+    final oldCamera = _camera;
+
+    setState(() {
+      _camera = null;
+    });
+
+    await oldCamera?.dispose();
+
+    await _initializeCamera();
 
     if (mounted) {
-      setState(() {});
+      _showMessage(
+        'Ukuran foto: ${_resolutionLabel(preset)}',
+      );
     }
   }
 
@@ -422,13 +469,9 @@ class _HomePageState extends State<HomePage>
       _barang = imported;
 
       await _saveDatabase();
-      await _scanDocumentedPhotos();
 
       if (mounted) {
-        setState(() {
-          _namaBarang = '';
-          _nomorController.clear();
-        });
+        setState(() {});
       }
 
       _showMessage(
@@ -449,12 +492,13 @@ class _HomePageState extends State<HomePage>
         return AlertDialog(
           backgroundColor:
               const Color(0xFF202124),
-          title:
-              const Text('Reset Excel'),
+          title: const Text(
+            'Reset Excel',
+          ),
           content: const Text(
-            'Daftar Excel yang tersimpan '
-            'akan dihapus. Foto yang sudah '
-            'ada tidak akan dihapus.',
+            'Daftar Excel yang tersimpan akan '
+            'dihapus. Foto yang sudah ada tidak '
+            'akan dihapus.',
           ),
           actions: [
             TextButton(
@@ -464,8 +508,7 @@ class _HomePageState extends State<HomePage>
                   false,
                 );
               },
-              child:
-                  const Text('BATAL'),
+              child: const Text('BATAL'),
             ),
             FilledButton(
               onPressed: () {
@@ -474,8 +517,7 @@ class _HomePageState extends State<HomePage>
                   true,
                 );
               },
-              child:
-                  const Text('HAPUS'),
+              child: const Text('HAPUS'),
             ),
           ],
         );
@@ -536,9 +578,7 @@ class _HomePageState extends State<HomePage>
         : normalized;
   }
 
-  String? _findBarang(
-    String input,
-  ) {
+  String? _findBarang(String input) {
     final nomor = input.trim();
 
     if (nomor.isEmpty) {
@@ -552,11 +592,8 @@ class _HomePageState extends State<HomePage>
     final normalizedInput =
         _normalizeNumber(nomor);
 
-    for (final entry
-        in _barang.entries) {
-      if (_normalizeNumber(
-            entry.key,
-          ) ==
+    for (final entry in _barang.entries) {
+      if (_normalizeNumber(entry.key) ==
           normalizedInput) {
         return entry.value;
       }
@@ -565,53 +602,22 @@ class _HomePageState extends State<HomePage>
     return null;
   }
 
-  String? _findOriginalNumber(
-    String input,
-  ) {
-    final nomor = input.trim();
-
-    if (_barang.containsKey(nomor)) {
-      return nomor;
-    }
-
-    final normalized =
-        _normalizeNumber(nomor);
-
-    for (final key
-        in _barang.keys) {
-      if (_normalizeNumber(key) ==
-          normalized) {
-        return key;
-      }
-    }
-
-    return null;
-  }
-
-  void _searchNumber(
-    String value,
-  ) {
-    final nama =
-        _findBarang(value);
+  void _searchNumber(String value) {
+    final nama = _findBarang(value);
 
     if (!mounted) {
       return;
     }
 
     setState(() {
-      _namaBarang =
-          nama ?? '';
+      _namaBarang = nama ?? '';
     });
   }
 
-  String _cleanFileName(
-    String text,
-  ) {
+  String _cleanFileName(String text) {
     var cleaned =
         text.replaceAll(
-      RegExp(
-        r'[\\/:*?"<>|]',
-      ),
+      RegExp(r'[\\/:*?"<>|]'),
       '',
     );
 
@@ -632,10 +638,11 @@ class _HomePageState extends State<HomePage>
         : cleaned;
   }
 
-  Future<Directory>
-      _photoDirectory() async {
-    final directory =
-        Directory(_storagePath);
+  Future<Directory> _photoDirectory() async {
+    final directory = Directory(
+      '/storage/emulated/0/'
+      'Dokumentasi Barang Pecah',
+    );
 
     if (!await directory.exists()) {
       await directory.create(
@@ -646,197 +653,11 @@ class _HomePageState extends State<HomePage>
     return directory;
   }
 
-  Future<void>
-      _scanDocumentedPhotos() async {
-    try {
-      final directory =
-          await _photoDirectory();
-
-      final files =
-          await directory.list().toList();
-
-      final Set<String> found =
-          <String>{};
-
-      for (final entity in files) {
-        if (entity is! File) {
-          continue;
-        }
-
-        final name =
-            entity.path
-                .split('/')
-                .last;
-
-        if (!name
-            .toLowerCase()
-            .endsWith('.jpg')) {
-          continue;
-        }
-
-        final match =
-            RegExp(
-          r'^([^_]+)_.+\.jpg$',
-          caseSensitive: false,
-        ).firstMatch(name);
-
-        if (match != null) {
-          found.add(
-            _normalizeNumber(
-              match.group(1) ?? '',
-            ),
-          );
-        }
-      }
-
-      if (mounted) {
-        setState(() {
-          _documentedNumbers =
-              found;
-        });
-      }
-    } catch (_) {
-      if (mounted) {
-        setState(() {
-          _documentedNumbers.clear();
-        });
-      }
-    }
-  }
-
-  bool _isDocumented(
-    String nomor,
-  ) {
-    return _documentedNumbers.contains(
-      _normalizeNumber(nomor),
-    );
-  }
-
-  int get _totalItems {
-    return _barang.length;
-  }
-
-  int get _documentedCount {
-    int count = 0;
-
-    for (final key
-        in _barang.keys) {
-      if (_isDocumented(key)) {
-        count++;
-      }
-    }
-
-    return count;
-  }
-
-  int get _remainingCount {
-    return math.max(
-      0,
-      _totalItems - _documentedCount,
-    );
-  }
-
-  double get _progress {
-    if (_totalItems == 0) {
-      return 0;
-    }
-
-    return _documentedCount /
-        _totalItems;
-  }
-
-  List<String> get _orderedNumbers {
-    return _barang.keys.toList();
-  }
-
-  int _currentIndex() {
-    final original =
-        _findOriginalNumber(
-      _nomorController.text,
-    );
-
-    if (original == null) {
-      return -1;
-    }
-
-    return _orderedNumbers
-        .indexOf(original);
-  }
-
-  void _selectNumber(
-    String nomor,
-  ) {
-    _nomorController.text =
-        nomor;
-
-    _searchNumber(nomor);
-
-    setState(() {
-      _statusPanelOpen = false;
-      _numberEditorOpen = false;
-    });
-
-    FocusScope.of(context)
-        .unfocus();
-  }
-
-  void _goPrevious() {
-    final numbers =
-        _orderedNumbers;
-
-    if (numbers.isEmpty) {
-      return;
-    }
-
-    final current =
-        _currentIndex();
-
-    int target;
-
-    if (current <= 0) {
-      target =
-          numbers.length - 1;
-    } else {
-      target = current - 1;
-    }
-
-    _selectNumber(
-      numbers[target],
-    );
-  }
-
-  void _goNext() {
-    final numbers =
-        _orderedNumbers;
-
-    if (numbers.isEmpty) {
-      return;
-    }
-
-    final current =
-        _currentIndex();
-
-    int target;
-
-    if (current < 0 ||
-        current >=
-            numbers.length - 1) {
-      target = 0;
-    } else {
-      target = current + 1;
-    }
-
-    _selectNumber(
-      numbers[target],
-    );
-  }
-
   Future<File> _uniqueFile(
     Directory directory,
     String baseName,
   ) async {
-    var candidate =
-        File(
+    var candidate = File(
       '${directory.path}/$baseName.jpg',
     );
 
@@ -847,8 +668,7 @@ class _HomePageState extends State<HomePage>
     int index = 1;
 
     while (true) {
-      candidate =
-          File(
+      candidate = File(
         '${directory.path}/'
         '${baseName}_$index.jpg',
       );
@@ -859,6 +679,60 @@ class _HomePageState extends State<HomePage>
 
       index++;
     }
+  }
+
+  Future<List<File>> _getPhotoFiles() async {
+    try {
+      final directory =
+          await _photoDirectory();
+
+      final entities =
+          await directory.list().toList();
+
+      final files = entities
+          .whereType<File>()
+          .where(
+            (file) {
+              final lower =
+                  file.path.toLowerCase();
+
+              return lower.endsWith('.jpg') ||
+                  lower.endsWith('.jpeg') ||
+                  lower.endsWith('.png');
+            },
+          )
+          .toList();
+
+      files.sort(
+        (a, b) {
+          final aTime =
+              a.statSync().modified;
+
+          final bTime =
+              b.statSync().modified;
+
+          return bTime.compareTo(aTime);
+        },
+      );
+
+      return files;
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<void> _loadLatestPhoto() async {
+    final files =
+        await _getPhotoFiles();
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _latestPhoto =
+          files.isEmpty ? null : files.first;
+    });
   }
 
   Future<void> _takePhoto() async {
@@ -879,11 +753,9 @@ class _HomePageState extends State<HomePage>
       return;
     }
 
-    final nama =
-        _findBarang(nomor);
+    final nama = _findBarang(nomor);
 
-    if (nama == null ||
-        nama.isEmpty) {
+    if (nama == null || nama.isEmpty) {
       _showMessage(
         'Nomor $nomor tidak ditemukan di Excel.',
       );
@@ -902,15 +774,6 @@ class _HomePageState extends State<HomePage>
       return;
     }
 
-    if (_isDocumented(nomor)) {
-      final ulang =
-          await _confirmRetake(nomor);
-
-      if (ulang != true) {
-        return;
-      }
-    }
-
     setState(() {
       _saving = true;
     });
@@ -918,12 +781,6 @@ class _HomePageState extends State<HomePage>
     try {
       if (_timerSeconds > 0) {
         await _runCountdown();
-      }
-
-      if (!camera.value.isInitialized) {
-        throw Exception(
-          'Kamera tidak aktif.',
-        );
       }
 
       final photo =
@@ -947,22 +804,17 @@ class _HomePageState extends State<HomePage>
         baseName,
       );
 
-      await File(photo.path)
-          .copy(target.path);
+      await File(photo.path).copy(
+        target.path,
+      );
 
       if (!mounted) {
         return;
       }
 
       setState(() {
-        _lastPhotoPath =
-            target.path;
-
-        _documentedNumbers.add(
-          _normalizeNumber(nomor),
-        );
-
         _saving = false;
+        _latestPhoto = target;
       });
 
       _showPhotoSavedMessage(
@@ -982,63 +834,59 @@ class _HomePageState extends State<HomePage>
   }
 
   Future<void> _runCountdown() async {
-    for (int i = _timerSeconds;
-        i > 0;
-        i--) {
+    for (
+      int i = _timerSeconds;
+      i > 0;
+      i--
+    ) {
       if (!mounted) {
         return;
       }
 
-      setState(() {});
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        barrierColor: Colors.transparent,
+        builder: (context) {
+          Future.delayed(
+            const Duration(seconds: 1),
+            () {
+              if (Navigator.canPop(context)) {
+                Navigator.pop(context);
+              }
+            },
+          );
 
-      await Future.delayed(
-        const Duration(seconds: 1),
+          return Center(
+            child: Material(
+              color: Colors.transparent,
+              child: Container(
+                width: 110,
+                height: 110,
+                decoration: BoxDecoration(
+                  color: Colors.black
+                      .withValues(alpha: 0.75),
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: Colors.white54,
+                    width: 2,
+                  ),
+                ),
+                alignment: Alignment.center,
+                child: Text(
+                  '$i',
+                  style: const TextStyle(
+                    fontSize: 58,
+                    fontWeight:
+                        FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
       );
     }
-  }
-
-  Future<bool?> _confirmRetake(
-    String nomor,
-  ) {
-    return showDialog<bool>(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          backgroundColor:
-              const Color(0xFF202124),
-          title: const Text(
-            'Sudah didokumentasikan',
-          ),
-          content: Text(
-            'Nomor $nomor sudah memiliki '
-            'foto.\n\nApakah ingin mengambil '
-            'foto lagi?',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.pop(
-                  context,
-                  false,
-                );
-              },
-              child:
-                  const Text('BATAL'),
-            ),
-            FilledButton(
-              onPressed: () {
-                Navigator.pop(
-                  context,
-                  true,
-                );
-              },
-              child:
-                  const Text('FOTO ULANG'),
-            ),
-          ],
-        );
-      },
-    );
   }
 
   void _showPhotoSavedMessage(
@@ -1053,12 +901,15 @@ class _HomePageState extends State<HomePage>
       ..showSnackBar(
         SnackBar(
           duration:
-              const Duration(seconds: 4),
+              const Duration(seconds: 3),
           behavior:
               SnackBarBehavior.floating,
           content: Text(
-            'Foto tersimpan\n'
-            '${path.split('/').last}',
+            'Foto tersimpan\n$path',
+          ),
+          action: SnackBarAction(
+            label: 'LIHAT',
+            onPressed: _openGallery,
           ),
         ),
       );
@@ -1073,8 +924,7 @@ class _HomePageState extends State<HomePage>
       return;
     }
 
-    final oldCamera =
-        _camera;
+    final oldCamera = _camera;
 
     setState(() {
       _camera = null;
@@ -1084,8 +934,7 @@ class _HomePageState extends State<HomePage>
 
     _cameraIndex++;
 
-    if (_cameraIndex >=
-        cameras.length) {
+    if (_cameraIndex >= cameras.length) {
       _cameraIndex = 0;
     }
 
@@ -1135,9 +984,7 @@ class _HomePageState extends State<HomePage>
     }
   }
 
-  Future<void> _setZoom(
-    double value,
-  ) async {
+  Future<void> _setZoom(double value) async {
     final camera = _camera;
 
     if (camera == null ||
@@ -1145,8 +992,7 @@ class _HomePageState extends State<HomePage>
       return;
     }
 
-    final safeZoom =
-        value.clamp(
+    final safeZoom = value.clamp(
       _minZoom,
       _maxZoom,
     );
@@ -1158,53 +1004,10 @@ class _HomePageState extends State<HomePage>
 
       if (mounted) {
         setState(() {
-          _zoom =
-              safeZoom.toDouble();
+          _zoom = safeZoom.toDouble();
         });
       }
     } catch (_) {}
-  }
-
-  Future<void> _changeResolution(
-    ResolutionPreset preset,
-  ) async {
-    if (_resolutionPreset ==
-        preset) {
-      return;
-    }
-
-    setState(() {
-      _resolutionPreset =
-          preset;
-    });
-
-    await _saveSettings();
-
-    await _disposeCameraOnly();
-    await _initializeCamera();
-
-    if (mounted) {
-      _showMessage(
-        'Kualitas foto: '
-        '${_resolutionLabel(preset)}',
-      );
-    }
-  }
-
-  Future<void> _changeAspectRatio(
-    String ratio,
-  ) async {
-    setState(() {
-      _aspectRatio = ratio;
-    });
-
-    await _saveSettings();
-
-    if (mounted) {
-      _showMessage(
-        'Tampilan kamera: $ratio',
-      );
-    }
   }
 
   void _openNumberEditor() {
@@ -1212,7 +1015,6 @@ class _HomePageState extends State<HomePage>
       _numberEditorOpen = true;
       _settingsOpen = false;
       _excelMenuOpen = false;
-      _statusPanelOpen = false;
     });
 
     WidgetsBinding.instance
@@ -1228,11 +1030,9 @@ class _HomePageState extends State<HomePage>
       _settingsOpen = false;
       _excelMenuOpen = false;
       _numberEditorOpen = false;
-      _statusPanelOpen = false;
     });
 
-    FocusScope.of(context)
-        .unfocus();
+    FocusScope.of(context).unfocus();
   }
 
   String _flashLabel() {
@@ -1293,76 +1093,22 @@ class _HomePageState extends State<HomePage>
     });
   }
 
-  Future<void> _exportCsv() async {
-    if (_barang.isEmpty) {
-      _showMessage(
-        'Belum ada data Excel.',
-      );
-      return;
-    }
+  Future<void> _openGallery() async {
+    setState(() {
+      _settingsOpen = false;
+      _excelMenuOpen = false;
+      _numberEditorOpen = false;
+    });
 
-    try {
-      final directory =
-          await _photoDirectory();
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) =>
+            const PhotoGalleryPage(),
+      ),
+    );
 
-      final file =
-          File(
-        '${directory.path}/'
-        'Laporan Dokumentasi Barang.csv',
-      );
-
-      final buffer =
-          StringBuffer();
-
-      buffer.writeln(
-        'No,Nama Barang,Status,File Foto',
-      );
-
-      for (final entry
-          in _barang.entries) {
-        final nomor =
-            entry.key;
-
-        final nama =
-            entry.value;
-
-        final status =
-            _isDocumented(nomor)
-                ? 'SUDAH'
-                : 'BELUM';
-
-        final foto =
-            _isDocumented(nomor)
-                ? '${_cleanFileName(nomor)}_'
-                    '${_cleanFileName(nama)}.jpg'
-                : '';
-
-        buffer.writeln(
-          '${_csv(nomor)},'
-          '${_csv(nama)},'
-          '${_csv(status)},'
-          '${_csv(foto)}',
-        );
-      }
-
-      await file.writeAsString(
-        buffer.toString(),
-        flush: true,
-      );
-
-      _showMessage(
-        'Laporan berhasil dibuat:\n'
-        '${file.path}',
-      );
-    } catch (e) {
-      _showMessage(
-        'Gagal membuat laporan: $e',
-      );
-    }
-  }
-
-  String _csv(String value) {
-    return '"${value.replaceAll('"', '""')}"';
+    await _loadLatestPhoto();
   }
 
   @override
@@ -1373,6 +1119,7 @@ class _HomePageState extends State<HomePage>
     _camera?.dispose();
 
     _nomorController.dispose();
+
     _nomorFocus.dispose();
 
     super.dispose();
@@ -1383,8 +1130,7 @@ class _HomePageState extends State<HomePage>
     if (_loading) {
       return const Scaffold(
         body: Center(
-          child:
-              CircularProgressIndicator(),
+          child: CircularProgressIndicator(),
         ),
       );
     }
@@ -1398,14 +1144,12 @@ class _HomePageState extends State<HomePage>
       body: Stack(
         fit: StackFit.expand,
         children: [
-          _buildCameraPreview(
-            cameraReady,
-          ),
-          if (_grid)
-            _buildGrid(),
+          _buildCameraPreview(cameraReady),
+
+          if (_grid) _buildGrid(),
 
           _buildTopControls(),
-          _buildProgressBar(),
+
           _buildBottomControls(),
 
           if (_settingsOpen)
@@ -1413,9 +1157,6 @@ class _HomePageState extends State<HomePage>
 
           if (_excelMenuOpen)
             _buildExcelPanel(),
-
-          if (_statusPanelOpen)
-            _buildStatusPanel(),
 
           if (_numberEditorOpen)
             _buildNumberPanel(),
@@ -1435,22 +1176,18 @@ class _HomePageState extends State<HomePage>
         color: Colors.black,
         child: const Center(
           child: Column(
-            mainAxisSize:
-                MainAxisSize.min,
+            mainAxisSize: MainAxisSize.min,
             children: [
               Icon(
-                Icons
-                    .no_photography_outlined,
+                Icons.no_photography_outlined,
                 size: 58,
-                color:
-                    Colors.white70,
+                color: Colors.white70,
               ),
               SizedBox(height: 12),
               Text(
                 'Kamera belum tersedia',
                 style: TextStyle(
-                  color:
-                      Colors.white70,
+                  color: Colors.white70,
                   fontSize: 16,
                 ),
               ),
@@ -1460,210 +1197,174 @@ class _HomePageState extends State<HomePage>
       );
     }
 
-    final preview =
-        CameraPreview(_camera!);
+    return LayoutBuilder(
+      builder: (
+        context,
+        constraints,
+      ) {
+        final width = constraints.maxWidth;
+        final height = constraints.maxHeight;
 
-    return Center(
-      child: AspectRatio(
-        aspectRatio:
-            _aspectRatio == '16:9'
-                ? 16 / 9
-                : 4 / 3,
-        child: ClipRect(
-          child: FittedBox(
-            fit: BoxFit.cover,
+        final cameraRatio =
+            _camera!.value.aspectRatio;
+
+        final screenRatio =
+            width / height;
+
+        double scale = 1.0;
+
+        if (cameraRatio > screenRatio) {
+          scale =
+              cameraRatio / screenRatio;
+        } else {
+          scale =
+              screenRatio / cameraRatio;
+        }
+
+        return ClipRect(
+          child: Transform.scale(
+            scale: scale,
+            alignment: Alignment.center,
             child: SizedBox(
-              width:
-                  _camera!
-                      .value
-                      .previewSize
-                      ?.height ??
-                  1,
-              height:
-                  _camera!
-                      .value
-                      .previewSize
-                      ?.width ??
-                  1,
-              child: preview,
+              width: width,
+              height: height,
+              child: CameraPreview(
+                _camera!,
+              ),
             ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 
   Widget _buildTopControls() {
-    return SafeArea(
-      child: Padding(
-        padding:
-            const EdgeInsets.fromLTRB(
-          8,
-          6,
-          8,
-          0,
-        ),
-        child: LayoutBuilder(
-          builder:
-              (context, constraints) {
-            final width =
-                constraints.maxWidth;
-
-            final compact =
-                width < 380;
-
-            return Row(
+    return Positioned(
+      top: 0,
+      left: 0,
+      right: 0,
+      child: SafeArea(
+        bottom: false,
+        child: Padding(
+          padding:
+              const EdgeInsets.fromLTRB(
+            10,
+            8,
+            10,
+            0,
+          ),
+          child: Container(
+            padding:
+                const EdgeInsets.symmetric(
+              horizontal: 6,
+              vertical: 6,
+            ),
+            decoration: BoxDecoration(
+              color: Colors.black
+                  .withValues(alpha: 0.52),
+              borderRadius:
+                  BorderRadius.circular(18),
+              border: Border.all(
+                color: Colors.white12,
+              ),
+            ),
+            child: Row(
               children: [
                 Expanded(
-                  child:
-                      _topControl(
-                    icon:
-                        _flashIcon(),
-                    label:
-                        _flashLabel(),
-                    onTap:
-                        _changeFlash,
-                    compact:
-                        compact,
+                  child: _topButton(
+                    icon: _flashIcon(),
+                    label: _flashLabel(),
+                    onTap: _changeFlash,
                   ),
                 ),
-                SizedBox(
-                  width:
-                      compact ? 4 : 6,
-                ),
                 Expanded(
-                  child:
-                      _topControl(
+                  child: _topButton(
                     icon:
                         Icons.timer_outlined,
-                    label:
-                        _timerLabel(),
-                    onTap:
-                        _cycleTimer,
-                    compact:
-                        compact,
+                    label: _timerLabel(),
+                    onTap: _cycleTimer,
                   ),
                 ),
-                SizedBox(
-                  width:
-                      compact ? 4 : 6,
-                ),
                 Expanded(
-                  child:
-                      _topControl(
+                  child: _topButton(
                     icon: _grid
                         ? Icons.grid_on
                         : Icons.grid_off,
-                    label:
-                        _grid
-                            ? 'ON'
-                            : 'GRID',
-                    active:
-                        _grid,
+                    label: 'GRID',
+                    active: _grid,
                     onTap: () {
                       setState(() {
-                        _grid =
-                            !_grid;
+                        _grid = !_grid;
                       });
                     },
-                    compact:
-                        compact,
                   ),
                 ),
-                SizedBox(
-                  width:
-                      compact ? 4 : 6,
-                ),
                 Expanded(
-                  child:
-                      _topControl(
-                    icon:
-                        Icons.settings,
+                  child: _topButton(
+                    icon: Icons.settings,
                     label: 'SET',
-                    active:
-                        _settingsOpen,
+                    active: _settingsOpen,
                     onTap: () {
                       setState(() {
                         _settingsOpen =
                             !_settingsOpen;
-                        _excelMenuOpen =
-                            false;
+                        _excelMenuOpen = false;
                         _numberEditorOpen =
-                            false;
-                        _statusPanelOpen =
                             false;
                       });
                     },
-                    compact:
-                        compact,
                   ),
                 ),
               ],
-            );
-          },
+            ),
+          ),
         ),
       ),
     );
   }
 
-  Widget _topControl({
+  Widget _topButton({
     required IconData icon,
     required String label,
     required VoidCallback onTap,
     bool active = false,
-    bool compact = false,
   }) {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        height:
-            compact ? 42 : 46,
-        decoration:
-            BoxDecoration(
+        height: 48,
+        margin:
+            const EdgeInsets.symmetric(
+          horizontal: 2,
+        ),
+        decoration: BoxDecoration(
           color: active
               ? Colors.green
-                  .withValues(
-                  alpha: 0.88,
-                )
-              : Colors.black
-                  .withValues(
-                  alpha: 0.62,
-                ),
+                  .withValues(alpha: 0.8)
+              : Colors.transparent,
           borderRadius:
-              BorderRadius.circular(
-            14,
-          ),
-          border: Border.all(
-            color: Colors.white24,
-          ),
+              BorderRadius.circular(13),
         ),
-        child: Row(
+        child: Column(
           mainAxisAlignment:
-              MainAxisAlignment
-                  .center,
+              MainAxisAlignment.center,
           children: [
             Icon(
               icon,
-              size:
-                  compact ? 18 : 20,
+              size: 21,
+              color: Colors.white,
             ),
-            const SizedBox(
-              width: 4,
-            ),
-            Flexible(
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow:
-                    TextOverflow
-                        .ellipsis,
-                style:
-                    TextStyle(
-                  fontSize:
-                      compact ? 9 : 10,
-                  fontWeight:
-                      FontWeight.bold,
-                ),
+            const SizedBox(height: 2),
+            Text(
+              label,
+              maxLines: 1,
+              overflow:
+                  TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 9,
+                fontWeight:
+                    FontWeight.bold,
               ),
             ),
           ],
@@ -1672,205 +1373,187 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  Widget _buildProgressBar() {
-    return SafeArea(
-      child: Align(
-        alignment:
-            Alignment.topCenter,
-        child: Padding(
+  Widget _buildBottomControls() {
+    final nomor =
+        _nomorController.text.trim();
+
+    final displayName =
+        nomor.isEmpty
+            ? 'PILIH NOMOR'
+            : _namaBarang.isEmpty
+                ? 'NOMOR TIDAK DITEMUKAN'
+                : '${_cleanFileName(nomor)}_'
+                    '${_cleanFileName(_namaBarang)}';
+
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 0,
+      child: SafeArea(
+        top: false,
+        child: Container(
           padding:
-              const EdgeInsets.only(
-            top: 58,
-            left: 12,
-            right: 12,
+              const EdgeInsets.fromLTRB(
+            12,
+            12,
+            12,
+            10,
           ),
-          child: Container(
-            padding:
-                const EdgeInsets
-                    .symmetric(
-              horizontal: 12,
-              vertical: 7,
-            ),
-            decoration:
-                BoxDecoration(
-              color: Colors.black
-                  .withValues(
-                alpha: 0.62,
-              ),
-              borderRadius:
-                  BorderRadius.circular(
-                16,
-              ),
-            ),
-            child: Row(
-              mainAxisSize:
-                  MainAxisSize.min,
-              children: [
-                const Icon(
-                  Icons
-                      .photo_camera_outlined,
-                  size: 16,
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                Colors.black.withValues(
+                  alpha: 0.0,
                 ),
-                const SizedBox(
-                  width: 7,
+                Colors.black.withValues(
+                  alpha: 0.86,
                 ),
-                Text(
-                  '$_documentedCount / '
-                  '$_totalItems',
-                  style:
-                      const TextStyle(
-                    fontSize: 13,
-                    fontWeight:
-                        FontWeight.bold,
-                  ),
-                ),
-                if (_totalItems >
-                    0) ...[
-                  const SizedBox(
-                    width: 8,
-                  ),
-                  Text(
-                    '${(_progress * 100).round()}%',
-                    style:
-                        const TextStyle(
-                      color: Colors
-                          .greenAccent,
-                      fontSize: 12,
-                      fontWeight:
-                          FontWeight.bold,
-                    ),
-                  ),
-                ],
               ],
             ),
           ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildBottomControls() {
-    final nomor =
-        _nomorController.text
-            .trim();
-
-    final found =
-        _namaBarang.isNotEmpty;
-
-    return SafeArea(
-      child: Align(
-        alignment:
-            Alignment.bottomCenter,
-        child: Padding(
-          padding:
-              const EdgeInsets
-                  .fromLTRB(
-            8,
-            0,
-            8,
-            12,
-          ),
           child: Column(
-            mainAxisSize:
-                MainAxisSize.min,
+            mainAxisSize: MainAxisSize.min,
             children: [
-              _buildCurrentItem(),
-              const SizedBox(
-                height: 8,
-              ),
-              _buildNavigation(),
-              const SizedBox(
-                height: 10,
-              ),
-              LayoutBuilder(
-                builder:
-                    (context,
-                        constraints) {
-                  return Row(
+              GestureDetector(
+                onTap: _openNumberEditor,
+                child: Container(
+                  width: double.infinity,
+                  constraints:
+                      const BoxConstraints(
+                    minHeight: 48,
+                    maxHeight: 62,
+                  ),
+                  padding:
+                      const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.black
+                        .withValues(
+                      alpha: 0.55,
+                    ),
+                    borderRadius:
+                        BorderRadius.circular(
+                      16,
+                    ),
+                    border: Border.all(
+                      color: _namaBarang
+                              .isNotEmpty
+                          ? Colors.greenAccent
+                          : Colors.white24,
+                    ),
+                  ),
+                  child: Row(
                     children: [
+                      Icon(
+                        _namaBarang
+                                .isNotEmpty
+                            ? Icons.check_circle
+                            : Icons.tag,
+                        color: _namaBarang
+                                .isNotEmpty
+                            ? Colors.greenAccent
+                            : Colors.white70,
+                        size: 22,
+                      ),
+                      const SizedBox(width: 10),
                       Expanded(
-                        child:
-                            _bottomAction(
-                          icon:
-                              Icons.table_view,
-                          text:
-                              'EXCEL',
-                          onTap: () {
-                            setState(() {
-                              _excelMenuOpen =
-                                  !_excelMenuOpen;
-                              _settingsOpen =
-                                  false;
-                              _numberEditorOpen =
-                                  false;
-                              _statusPanelOpen =
-                                  false;
-                            });
-                          },
+                        child: Text(
+                          displayName,
+                          maxLines: 1,
+                          overflow:
+                              TextOverflow.ellipsis,
+                          textAlign:
+                              TextAlign.center,
+                          style: TextStyle(
+                            color: _namaBarang
+                                    .isNotEmpty
+                                ? Colors.white
+                                : Colors.white70,
+                            fontSize: 14,
+                            fontWeight:
+                                FontWeight.bold,
+                          ),
                         ),
                       ),
-                      const SizedBox(
-                        width: 5,
-                      ),
-                      Expanded(
-                        child:
-                            _bottomAction(
-                          icon:
-                              Icons.list_alt,
-                          text:
-                              'STATUS',
-                          onTap: () {
-                            setState(() {
-                              _statusPanelOpen =
-                                  !_statusPanelOpen;
-                              _excelMenuOpen =
-                                  false;
-                              _settingsOpen =
-                                  false;
-                              _numberEditorOpen =
-                                  false;
-                            });
-                          },
-                        ),
-                      ),
-                      const SizedBox(
-                        width: 8,
-                      ),
-                      _shutterButton(),
-                      const SizedBox(
-                        width: 8,
-                      ),
-                      Expanded(
-                        child:
-                            _bottomAction(
-                          icon:
-                              Icons.tag,
-                          text:
-                              nomor.isEmpty
-                                  ? 'NOMOR'
-                                  : nomor,
-                          onTap:
-                              _openNumberEditor,
-                        ),
-                      ),
-                      const SizedBox(
-                        width: 5,
-                      ),
-                      Expanded(
-                        child:
-                            _bottomAction(
-                          icon:
-                              Icons
-                                  .flip_camera_android,
-                          text:
-                              'CAM',
-                          onTap:
-                              _switchCamera,
-                        ),
+                      const Icon(
+                        Icons.edit,
+                        size: 18,
+                        color: Colors.white54,
                       ),
                     ],
-                  );
-                },
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                height: 86,
+                child: Row(
+                  crossAxisAlignment:
+                      CrossAxisAlignment.center,
+                  children: [
+                    Expanded(
+                      child: Row(
+                        children: [
+                          _bottomButton(
+                            icon:
+                                Icons.table_view,
+                            label: 'EXCEL',
+                            onTap: () {
+                              setState(() {
+                                _excelMenuOpen =
+                                    !_excelMenuOpen;
+                                _settingsOpen =
+                                    false;
+                                _numberEditorOpen =
+                                    false;
+                              });
+                            },
+                          ),
+                          const SizedBox(width: 7),
+                          _bottomButton(
+                            icon: Icons.tag,
+                            label: nomor.isEmpty
+                                ? 'NOMOR'
+                                : nomor,
+                            onTap:
+                                _openNumberEditor,
+                          ),
+                        ],
+                      ),
+                    ),
+                    _thumbnailButton(),
+                    const SizedBox(width: 10),
+                    _shutterButton(),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Row(
+                        mainAxisAlignment:
+                            MainAxisAlignment.end,
+                        children: [
+                          _bottomButton(
+                            icon: Icons
+                                .flip_camera_android,
+                            label: 'CAM',
+                            onTap:
+                                _switchCamera,
+                          ),
+                          const SizedBox(width: 7),
+                          _bottomButton(
+                            icon: Icons
+                                .folder_outlined,
+                            label: 'FOLDER',
+                            onTap:
+                                _openGallery,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ],
           ),
@@ -1879,283 +1562,42 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  Widget _buildCurrentItem() {
-    final nomor =
-        _nomorController.text
-            .trim();
-
-    final found =
-        _namaBarang.isNotEmpty;
-
-    final documented =
-        nomor.isNotEmpty &&
-            _isDocumented(nomor);
-
-    return GestureDetector(
-      onTap:
-          _openNumberEditor,
-      child: Container(
-        width:
-            double.infinity,
-        constraints:
-            const BoxConstraints(
-          minHeight: 54,
-        ),
-        padding:
-            const EdgeInsets
-                .symmetric(
-          horizontal: 14,
-          vertical: 8,
-        ),
-        decoration:
-            BoxDecoration(
-          color: Colors.black
-              .withValues(
-            alpha: 0.72,
-          ),
-          borderRadius:
-              BorderRadius.circular(
-            17,
-          ),
-          border: Border.all(
-            color: documented
-                ? Colors.orangeAccent
-                : found
-                    ? Colors
-                        .greenAccent
-                    : Colors
-                        .white24,
-          ),
-        ),
-        child: Row(
-          children: [
-            Icon(
-              documented
-                  ? Icons
-                      .check_circle
-                  : found
-                      ? Icons
-                          .verified
-                      : Icons.tag,
-              color: documented
-                  ? Colors
-                      .orangeAccent
-                  : found
-                      ? Colors
-                          .greenAccent
-                      : Colors
-                          .white70,
-              size: 22,
-            ),
-            const SizedBox(
-              width: 9,
-            ),
-            Expanded(
-              child: Column(
-                crossAxisAlignment:
-                    CrossAxisAlignment
-                        .start,
-                children: [
-                  Text(
-                    nomor.isEmpty
-                        ? 'PILIH NOMOR BARANG'
-                        : nomor,
-                    style:
-                        const TextStyle(
-                      fontSize: 12,
-                      color:
-                          Colors.white54,
-                      fontWeight:
-                          FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(
-                    height: 2,
-                  ),
-                  Text(
-                    found
-                        ? _namaBarang
-                        : nomor.isEmpty
-                            ? 'Ketik nomor dari Excel'
-                            : 'Nomor tidak ditemukan',
-                    maxLines: 2,
-                    overflow:
-                        TextOverflow
-                            .ellipsis,
-                    style:
-                        TextStyle(
-                      color: found
-                          ? Colors.white
-                          : Colors
-                              .white70,
-                      fontSize: 15,
-                      fontWeight:
-                          FontWeight.bold,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            if (documented)
-              const Padding(
-                padding:
-                    EdgeInsets.only(
-                  left: 8,
-                ),
-                child: Text(
-                  'SUDAH',
-                  style:
-                      TextStyle(
-                    color: Colors
-                        .orangeAccent,
-                    fontSize: 10,
-                    fontWeight:
-                        FontWeight.bold,
-                  ),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildNavigation() {
-    return Row(
-      children: [
-        Expanded(
-          child:
-              _navigationButton(
-            icon:
-                Icons.chevron_left,
-            text:
-                'SEBELUMNYA',
-            onTap:
-                _goPrevious,
-          ),
-        ),
-        const SizedBox(
-          width: 8,
-        ),
-        Expanded(
-          child:
-              _navigationButton(
-            icon:
-                Icons.chevron_right,
-            text:
-                'BERIKUTNYA',
-            iconRight: true,
-            onTap:
-                _goNext,
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _navigationButton({
+  Widget _bottomButton({
     required IconData icon,
-    required String text,
-    required VoidCallback onTap,
-    bool iconRight = false,
-  }) {
-    final children = [
-      if (!iconRight)
-        Icon(
-          icon,
-          size: 20,
-        ),
-      const SizedBox(
-        width: 4,
-      ),
-      Text(
-        text,
-        style:
-            const TextStyle(
-          fontSize: 10,
-          fontWeight:
-              FontWeight.bold,
-        ),
-      ),
-      if (iconRight)
-        const SizedBox(
-          width: 4,
-        ),
-      if (iconRight)
-        Icon(
-          icon,
-          size: 20,
-        ),
-    ];
-
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        height: 38,
-        decoration:
-            BoxDecoration(
-          color: Colors.black
-              .withValues(
-            alpha: 0.60,
-          ),
-          borderRadius:
-              BorderRadius.circular(
-            14,
-          ),
-          border: Border.all(
-            color: Colors.white24,
-          ),
-        ),
-        child: Row(
-          mainAxisAlignment:
-              MainAxisAlignment
-                  .center,
-          children: children,
-        ),
-      ),
-    );
-  }
-
-  Widget _bottomAction({
-    required IconData icon,
-    required String text,
+    required String label,
     required VoidCallback onTap,
   }) {
     return GestureDetector(
       onTap: onTap,
       child: Container(
+        width: 54,
         height: 58,
-        decoration:
-            BoxDecoration(
+        decoration: BoxDecoration(
           color: Colors.black
-              .withValues(
-            alpha: 0.68,
-          ),
-          shape: BoxShape.circle,
+              .withValues(alpha: 0.65),
+          borderRadius:
+              BorderRadius.circular(15),
           border: Border.all(
             color: Colors.white24,
           ),
         ),
         child: Column(
           mainAxisAlignment:
-              MainAxisAlignment
-                  .center,
+              MainAxisAlignment.center,
           children: [
             Icon(
               icon,
               size: 21,
+              color: Colors.white,
             ),
-            const SizedBox(
-              height: 2,
-            ),
+            const SizedBox(height: 3),
             Text(
-              text,
+              label,
               maxLines: 1,
               overflow:
-                  TextOverflow
-                      .ellipsis,
-              style:
-                  const TextStyle(
+                  TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Colors.white,
                 fontSize: 8,
                 fontWeight:
                     FontWeight.bold,
@@ -2167,57 +1609,82 @@ class _HomePageState extends State<HomePage>
     );
   }
 
+  Widget _thumbnailButton() {
+    return GestureDetector(
+      onTap: _openGallery,
+      child: Container(
+        width: 62,
+        height: 62,
+        decoration: BoxDecoration(
+          color: Colors.black,
+          borderRadius:
+              BorderRadius.circular(14),
+          border: Border.all(
+            color: Colors.white70,
+            width: 2,
+          ),
+        ),
+        clipBehavior:
+            Clip.antiAlias,
+        child: _latestPhoto != null &&
+                _latestPhoto!.existsSync()
+            ? Image.file(
+                _latestPhoto!,
+                fit: BoxFit.cover,
+              )
+            : const Center(
+                child: Icon(
+                  Icons.photo_library_outlined,
+                  color: Colors.white70,
+                  size: 27,
+                ),
+              ),
+      ),
+    );
+  }
+
   Widget _shutterButton() {
     return GestureDetector(
       onTap:
-          _saving
-              ? null
-              : _takePhoto,
+          _saving ? null : _takePhoto,
       child: Container(
-        width: 78,
-        height: 78,
+        width: 82,
+        height: 82,
         padding:
-            const EdgeInsets.all(
-          5,
-        ),
-        decoration:
-            BoxDecoration(
-          shape:
-              BoxShape.circle,
-          border:
-              Border.all(
-            color:
-                Colors.white,
+            const EdgeInsets.all(5),
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: Colors.white,
             width: 4,
           ),
+          boxShadow: const [
+            BoxShadow(
+              color: Colors.black54,
+              blurRadius: 8,
+            ),
+          ],
         ),
         child: Container(
           decoration:
               const BoxDecoration(
-            color:
-                Colors.white,
-            shape:
-                BoxShape.circle,
+            color: Colors.white,
+            shape: BoxShape.circle,
           ),
           child: _saving
               ? const Padding(
                   padding:
-                      EdgeInsets.all(
-                    20,
-                  ),
+                      EdgeInsets.all(20),
                   child:
                       CircularProgressIndicator(
                     strokeWidth: 3,
-                    color:
-                        Colors.black,
+                    color: Colors.black,
                   ),
                 )
               : const Icon(
-                  Icons
-                      .camera_alt,
-                  color:
-                      Colors.black,
-                  size: 32,
+                  Icons.camera_alt,
+                  color: Colors.black,
+                  size: 34,
                 ),
         ),
       ),
@@ -2227,223 +1694,98 @@ class _HomePageState extends State<HomePage>
   Widget _buildGrid() {
     return IgnorePointer(
       child: CustomPaint(
-        painter:
-            _GridPainter(),
-        size:
-            Size.infinite,
+        painter: _GridPainter(),
+        size: Size.infinite,
       ),
     );
   }
 
   Widget _buildSettingsPanel() {
     return Positioned(
-      top: 58,
-      left: 10,
-      right: 10,
+      top: 75,
+      left: 12,
+      right: 12,
       child: SafeArea(
+        bottom: false,
         child: Container(
           constraints:
               const BoxConstraints(
-            maxHeight: 520,
+            maxWidth: 420,
           ),
           padding:
-              const EdgeInsets.all(
-            14,
-          ),
-          decoration:
-              BoxDecoration(
-            color: const Color(
-              0xFF171717,
-            ).withValues(
-              alpha: 0.97,
-            ),
+              const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: const Color(0xFF171717)
+                .withValues(alpha: 0.97),
             borderRadius:
-                BorderRadius.circular(
-              20,
-            ),
+                BorderRadius.circular(22),
             border: Border.all(
-              color:
-                  Colors.white24,
+              color: Colors.white24,
             ),
+            boxShadow: const [
+              BoxShadow(
+                blurRadius: 20,
+                color: Colors.black54,
+              ),
+            ],
           ),
           child: SingleChildScrollView(
             child: Column(
+              mainAxisSize:
+                  MainAxisSize.min,
               crossAxisAlignment:
-                  CrossAxisAlignment
-                      .start,
+                  CrossAxisAlignment.start,
               children: [
                 const Text(
                   'PENGATURAN KAMERA',
-                  style:
-                      TextStyle(
+                  style: TextStyle(
                     fontSize: 16,
                     fontWeight:
                         FontWeight.bold,
                   ),
                 ),
-                const SizedBox(
-                  height: 12,
-                ),
+                const SizedBox(height: 14),
                 _settingRow(
-                  icon:
-                      _flashIcon(),
-                  title:
-                      'Flash',
-                  value:
-                      _flashLabel(),
-                  onTap:
-                      _changeFlash,
+                  icon: _flashIcon(),
+                  title: 'Flash',
+                  value: _flashLabel(),
+                  onTap: _changeFlash,
                 ),
                 _settingRow(
                   icon:
                       Icons.timer_outlined,
-                  title:
-                      'Timer',
-                  value:
-                      _timerLabel(),
-                  onTap:
-                      _cycleTimer,
+                  title: 'Timer',
+                  value: _timerLabel(),
+                  onTap: _cycleTimer,
                 ),
                 _settingRow(
-                  icon:
-                      Icons.grid_3x3,
-                  title:
-                      'Grid',
+                  icon: Icons.grid_3x3,
+                  title: 'Grid',
                   value:
-                      _grid
-                          ? 'ON'
-                          : 'OFF',
+                      _grid ? 'ON' : 'OFF',
                   onTap: () {
                     setState(() {
-                      _grid =
-                          !_grid;
+                      _grid = !_grid;
                     });
                   },
                 ),
-                const Divider(
-                  color:
-                      Colors.white12,
-                ),
-                const Text(
-                  'RASIO TAMPILAN',
-                  style:
-                      TextStyle(
-                    color:
-                        Colors.white54,
-                    fontSize: 11,
-                    fontWeight:
-                        FontWeight.bold,
+                _settingRow(
+                  icon:
+                      Icons.high_quality,
+                  title: 'Ukuran Foto',
+                  value:
+                      _resolutionLabel(
+                    _resolutionPreset,
                   ),
+                  onTap:
+                      _showResolutionPicker,
                 ),
-                const SizedBox(
-                  height: 6,
-                ),
-                Row(
-                  children: [
-                    Expanded(
-                      child:
-                          _choiceButton(
-                        text:
-                            '4 : 3',
-                        selected:
-                            _aspectRatio ==
-                                '4:3',
-                        onTap: () =>
-                            _changeAspectRatio(
-                          '4:3',
-                        ),
-                      ),
-                    ),
-                    const SizedBox(
-                      width: 8,
-                    ),
-                    Expanded(
-                      child:
-                          _choiceButton(
-                        text:
-                            '16 : 9',
-                        selected:
-                            _aspectRatio ==
-                                '16:9',
-                        onTap: () =>
-                            _changeAspectRatio(
-                          '16:9',
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(
-                  height: 12,
-                ),
-                const Text(
-                  'KUALITAS / RESOLUSI',
-                  style:
-                      TextStyle(
-                    color:
-                        Colors.white54,
-                    fontSize: 11,
-                    fontWeight:
-                        FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(
-                  height: 6,
-                ),
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  children: [
-                    for (final preset
-                        in [
-                      ResolutionPreset
-                          .medium,
-                      ResolutionPreset
-                          .high,
-                      ResolutionPreset
-                          .veryHigh,
-                      ResolutionPreset
-                          .max,
-                    ])
-                      _choiceButton(
-                        text:
-                            _resolutionLabel(
-                          preset,
-                        ),
-                        selected:
-                            _resolutionPreset ==
-                                preset,
-                        onTap: () =>
-                            _changeResolution(
-                          preset,
-                        ),
-                      ),
-                  ],
-                ),
-                const SizedBox(
-                  height: 8,
-                ),
-                const Text(
-                  'Resolusi maksimum bergantung '
-                  'pada kemampuan kamera HP.',
-                  style:
-                      TextStyle(
-                    color:
-                        Colors.white38,
-                    fontSize: 10,
-                  ),
-                ),
-                const Divider(
-                  color:
-                      Colors.white12,
-                ),
+                const SizedBox(height: 8),
                 const Text(
                   'ZOOM',
-                  style:
-                      TextStyle(
-                    color:
-                        Colors.white54,
+                  style: TextStyle(
                     fontSize: 11,
+                    color: Colors.white54,
                     fontWeight:
                         FontWeight.bold,
                   ),
@@ -2452,24 +1794,20 @@ class _HomePageState extends State<HomePage>
                   children: [
                     Expanded(
                       child: Slider(
-                        min:
-                            _minZoom,
-                        max: _maxZoom <=
-                                _minZoom
-                            ? _minZoom +
-                                1
-                            : _maxZoom,
-                        value:
-                            _zoom.clamp(
+                        min: _minZoom,
+                        max:
+                            _maxZoom <=
+                                    _minZoom
+                                ? _minZoom + 1
+                                : _maxZoom,
+                        value: _zoom.clamp(
                           _minZoom,
                           _maxZoom <=
                                   _minZoom
-                              ? _minZoom +
-                                  1
+                              ? _minZoom + 1
                               : _maxZoom,
                         ),
-                        onChanged:
-                            _setZoom,
+                        onChanged: _setZoom,
                       ),
                     ),
                     Text(
@@ -2482,55 +1820,35 @@ class _HomePageState extends State<HomePage>
                     ),
                   ],
                 ),
+                const Divider(
+                  color: Colors.white12,
+                ),
+                _settingRow(
+                  icon: Icons.photo_library,
+                  title: 'Galeri Foto',
+                  value: 'Lihat foto',
+                  onTap: _openGallery,
+                ),
                 _settingRow(
                   icon:
                       Icons.folder_outlined,
-                  title:
-                      'Folder Foto',
+                  title: 'Penyimpanan',
                   value:
                       'Dokumentasi Barang Pecah',
                   onTap: () {
                     _showMessage(
-                      _storagePath,
+                      'Internal Storage/'
+                      'Dokumentasi Barang Pecah',
                     );
                   },
                 ),
                 _settingRow(
                   icon:
-                      Icons.assessment_outlined,
-                  title:
-                      'Progress',
-                  value:
-                      '$_documentedCount / '
-                      '$_totalItems',
-                  onTap: () {
-                    setState(() {
-                      _settingsOpen =
-                          false;
-                      _statusPanelOpen =
-                          true;
-                    });
-                  },
-                ),
-                _settingRow(
-                  icon:
-                      Icons.download_outlined,
-                  title:
-                      'Export Laporan',
-                  value:
-                      'CSV',
-                  onTap:
-                      _exportCsv,
-                ),
-                _settingRow(
-                  icon:
                       Icons.delete_outline,
-                  title:
-                      'Reset Excel',
+                  title: 'Reset Excel',
                   value:
                       '${_barang.length} data',
-                  onTap:
-                      _resetDatabase,
+                  onTap: _resetDatabase,
                 ),
               ],
             ),
@@ -2540,49 +1858,104 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  Widget _choiceButton({
-    required String text,
-    required bool selected,
-    required VoidCallback onTap,
-  }) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding:
-            const EdgeInsets
-                .symmetric(
-          horizontal: 12,
-          vertical: 9,
-        ),
-        decoration:
-            BoxDecoration(
-          color: selected
-              ? Colors.green
-                  .withValues(
-                  alpha: 0.85,
-                )
-              : Colors.white10,
-          borderRadius:
-              BorderRadius.circular(
-            12,
+  Future<void> _showResolutionPicker() async {
+    final selected =
+        await showModalBottomSheet<
+            ResolutionPreset>(
+      context: context,
+      backgroundColor:
+          const Color(0xFF171717),
+      builder: (context) {
+        return SafeArea(
+          child: Padding(
+            padding:
+                const EdgeInsets.all(18),
+            child: Column(
+              mainAxisSize:
+                  MainAxisSize.min,
+              children: [
+                const Text(
+                  'UKURAN FOTO',
+                  style: TextStyle(
+                    fontSize: 17,
+                    fontWeight:
+                        FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                ...ResolutionPreset.values.map(
+                  (preset) {
+                    final selected =
+                        preset ==
+                            _resolutionPreset;
+
+                    return ListTile(
+                      leading: Icon(
+                        selected
+                            ? Icons
+                                .radio_button_checked
+                            : Icons
+                                .radio_button_off,
+                        color: selected
+                            ? Colors
+                                .greenAccent
+                            : Colors.white54,
+                      ),
+                      title: Text(
+                        _resolutionLabel(
+                          preset,
+                        ),
+                      ),
+                      subtitle: Text(
+                        _resolutionDescription(
+                          preset,
+                        ),
+                      ),
+                      onTap: () {
+                        Navigator.pop(
+                          context,
+                          preset,
+                        );
+                      },
+                    );
+                  },
+                ),
+              ],
+            ),
           ),
-          border: Border.all(
-            color: selected
-                ? Colors.greenAccent
-                : Colors.white12,
-          ),
-        ),
-        child: Text(
-          text,
-          style:
-              const TextStyle(
-            fontSize: 11,
-            fontWeight:
-                FontWeight.bold,
-          ),
-        ),
-      ),
+        );
+      },
     );
+
+    if (selected != null) {
+      await _changeResolution(
+        selected,
+      );
+    }
+  }
+
+  String _resolutionDescription(
+    ResolutionPreset preset,
+  ) {
+    switch (preset) {
+      case ResolutionPreset.low:
+        return 'Ukuran kecil, hemat penyimpanan';
+
+      case ResolutionPreset.medium:
+        return 'Ukuran sedang';
+
+      case ResolutionPreset.high:
+        return 'Kualitas tinggi';
+
+      case ResolutionPreset.veryHigh:
+        return 'Kualitas sangat tinggi';
+
+      case ResolutionPreset.ultraHigh:
+        return 'Kualitas ultra tinggi';
+
+      case ResolutionPreset.max:
+        return 'Resolusi maksimum kamera';
+    }
   }
 
   Widget _settingRow({
@@ -2594,26 +1967,20 @@ class _HomePageState extends State<HomePage>
     return InkWell(
       onTap: onTap,
       borderRadius:
-          BorderRadius.circular(
-        12,
-      ),
+          BorderRadius.circular(12),
       child: Padding(
         padding:
-            const EdgeInsets
-                .symmetric(
-          vertical: 8,
+            const EdgeInsets.symmetric(
+          vertical: 9,
         ),
         child: Row(
           children: [
             Icon(
               icon,
               size: 21,
-              color:
-                  Colors.white70,
+              color: Colors.white70,
             ),
-            const SizedBox(
-              width: 12,
-            ),
+            const SizedBox(width: 12),
             Expanded(
               child: Text(
                 title,
@@ -2627,15 +1994,14 @@ class _HomePageState extends State<HomePage>
             Flexible(
               child: Text(
                 value,
-                textAlign:
-                    TextAlign.right,
+                maxLines: 1,
                 overflow:
                     TextOverflow.ellipsis,
+                textAlign: TextAlign.end,
                 style:
                     const TextStyle(
-                  color:
-                      Colors.white54,
-                  fontSize: 11,
+                  color: Colors.white54,
+                  fontSize: 12,
                 ),
               ),
             ),
@@ -2647,413 +2013,83 @@ class _HomePageState extends State<HomePage>
 
   Widget _buildExcelPanel() {
     return Positioned(
-      left: 10,
-      right: 10,
-      bottom: 160,
+      left: 12,
+      right: 12,
+      bottom: 112,
       child: SafeArea(
-        child: Container(
-          padding:
-              const EdgeInsets.all(
-            14,
-          ),
-          decoration:
-              BoxDecoration(
-            color: const Color(
-              0xFF171717,
-            ).withValues(
-              alpha: 0.97,
+        top: false,
+        child: Align(
+          alignment:
+              Alignment.bottomLeft,
+          child: Container(
+            width: 280,
+            padding:
+                const EdgeInsets.all(15),
+            decoration: BoxDecoration(
+              color: const Color(0xFF171717)
+                  .withValues(alpha: 0.97),
+              borderRadius:
+                  BorderRadius.circular(20),
+              border: Border.all(
+                color: Colors.white24,
+              ),
             ),
-            borderRadius:
-                BorderRadius.circular(
-              20,
-            ),
-            border: Border.all(
-              color:
-                  Colors.white24,
-            ),
-          ),
-          child: Column(
-            mainAxisSize:
-                MainAxisSize.min,
-            children: [
-              const Row(
-                children: [
-                  Icon(
-                    Icons.table_view,
-                    color:
-                        Colors.greenAccent,
-                  ),
-                  SizedBox(
-                    width: 10,
-                  ),
-                  Text(
-                    'DATA EXCEL',
-                    style:
-                        TextStyle(
-                      fontWeight:
-                          FontWeight.bold,
+            child: Column(
+              mainAxisSize:
+                  MainAxisSize.min,
+              children: [
+                const Row(
+                  children: [
+                    Icon(
+                      Icons.table_view,
+                      color:
+                          Colors.greenAccent,
+                    ),
+                    SizedBox(width: 10),
+                    Text(
+                      'DATA EXCEL',
+                      style: TextStyle(
+                        fontWeight:
+                            FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child:
+                      FilledButton.icon(
+                    onPressed:
+                        _importExcel,
+                    icon: const Icon(
+                      Icons.upload_file,
+                    ),
+                    label: const Text(
+                      'IMPORT EXCEL',
                     ),
                   ),
-                ],
-              ),
-              const SizedBox(
-                height: 10,
-              ),
-              SizedBox(
-                width:
-                    double.infinity,
-                child:
-                    FilledButton.icon(
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  '${_barang.length} data tersimpan',
+                  style:
+                      const TextStyle(
+                    color: Colors.white54,
+                    fontSize: 12,
+                  ),
+                ),
+                TextButton(
                   onPressed:
-                      _importExcel,
-                  icon:
-                      const Icon(
-                    Icons.upload_file,
-                  ),
-                  label:
-                      const Text(
-                    'IMPORT / GANTI EXCEL',
+                      _resetDatabase,
+                  child: const Text(
+                    'Reset data Excel',
                   ),
                 ),
-              ),
-              const SizedBox(
-                height: 5,
-              ),
-              Text(
-                '${_barang.length} data barang',
-                style:
-                    const TextStyle(
-                  color:
-                      Colors.white54,
-                  fontSize: 12,
-                ),
-              ),
-              const SizedBox(
-                height: 5,
-              ),
-              Row(
-                children: [
-                  Expanded(
-                    child:
-                        OutlinedButton.icon(
-                      onPressed:
-                          _exportCsv,
-                      icon:
-                          const Icon(
-                        Icons
-                            .download_outlined,
-                      ),
-                      label:
-                          const Text(
-                        'EXPORT',
-                      ),
-                    ),
-                  ),
-                  const SizedBox(
-                    width: 8,
-                  ),
-                  Expanded(
-                    child:
-                        TextButton(
-                      onPressed:
-                          _resetDatabase,
-                      child:
-                          const Text(
-                        'RESET EXCEL',
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildStatusPanel() {
-    return Positioned.fill(
-      child: Container(
-        color: Colors.black
-            .withValues(
-          alpha: 0.72,
-        ),
-        child: SafeArea(
-          child: Column(
-            children: [
-              Padding(
-                padding:
-                    const EdgeInsets
-                        .fromLTRB(
-                  12,
-                  8,
-                  12,
-                  8,
-                ),
-                child: Row(
-                  children: [
-                    const Expanded(
-                      child: Text(
-                        'STATUS DOKUMENTASI',
-                        style:
-                            TextStyle(
-                          fontSize: 18,
-                          fontWeight:
-                              FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                    IconButton(
-                      onPressed: () {
-                        setState(() {
-                          _statusPanelOpen =
-                              false;
-                        });
-                      },
-                      icon:
-                          const Icon(
-                        Icons.close,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Padding(
-                padding:
-                    const EdgeInsets
-                        .symmetric(
-                  horizontal: 12,
-                ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child:
-                          _statusCard(
-                        title:
-                            'TOTAL',
-                        value:
-                            '$_totalItems',
-                        icon:
-                            Icons.inventory_2_outlined,
-                      ),
-                    ),
-                    const SizedBox(
-                      width: 7,
-                    ),
-                    Expanded(
-                      child:
-                          _statusCard(
-                        title:
-                            'SUDAH',
-                        value:
-                            '$_documentedCount',
-                        icon:
-                            Icons.check_circle_outline,
-                      ),
-                    ),
-                    const SizedBox(
-                      width: 7,
-                    ),
-                    Expanded(
-                      child:
-                          _statusCard(
-                        title:
-                            'BELUM',
-                        value:
-                            '$_remainingCount',
-                        icon:
-                            Icons
-                                .pending_outlined,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(
-                height: 10,
-              ),
-              Expanded(
-                child:
-                    _barang.isEmpty
-                        ? const Center(
-                            child: Text(
-                              'Import Excel terlebih dahulu.',
-                              style:
-                                  TextStyle(
-                                color:
-                                    Colors.white54,
-                              ),
-                            ),
-                          )
-                        : ListView.builder(
-                            padding:
-                                const EdgeInsets
-                                    .fromLTRB(
-                              12,
-                              0,
-                              12,
-                              20,
-                            ),
-                            itemCount:
-                                _barang.length,
-                            itemBuilder:
-                                (context,
-                                    index) {
-                              final entry =
-                                  _barang
-                                      .entries
-                                      .elementAt(
-                                index,
-                              );
-
-                              final documented =
-                                  _isDocumented(
-                                entry.key,
-                              );
-
-                              return Card(
-                                color:
-                                    const Color(
-                                  0xFF1B1B1B,
-                                ),
-                                margin:
-                                    const EdgeInsets
-                                        .only(
-                                  bottom:
-                                      6,
-                                ),
-                                child:
-                                    ListTile(
-                                  onTap:
-                                      () =>
-                                          _selectNumber(
-                                    entry.key,
-                                  ),
-                                  leading:
-                                      CircleAvatar(
-                                    backgroundColor:
-                                        documented
-                                            ? Colors.green
-                                                .withValues(
-                                                alpha:
-                                                    0.20,
-                                              )
-                                            : Colors.orange
-                                                .withValues(
-                                                alpha:
-                                                    0.20,
-                                              ),
-                                    child:
-                                        Icon(
-                                      documented
-                                          ? Icons
-                                              .check
-                                          : Icons
-                                              .schedule,
-                                      color:
-                                          documented
-                                              ? Colors
-                                                  .greenAccent
-                                              : Colors
-                                                  .orangeAccent,
-                                    ),
-                                  ),
-                                  title:
-                                      Text(
-                                    '${entry.key} — '
-                                    '${entry.value}',
-                                    maxLines:
-                                        2,
-                                    overflow:
-                                        TextOverflow
-                                            .ellipsis,
-                                    style:
-                                        const TextStyle(
-                                      fontWeight:
-                                          FontWeight.bold,
-                                    ),
-                                  ),
-                                  trailing:
-                                      Text(
-                                    documented
-                                        ? 'SUDAH'
-                                        : 'BELUM',
-                                    style:
-                                        TextStyle(
-                                      color:
-                                          documented
-                                              ? Colors
-                                                  .greenAccent
-                                              : Colors
-                                                  .orangeAccent,
-                                      fontSize:
-                                          10,
-                                      fontWeight:
-                                          FontWeight.bold,
-                                    ),
-                                  ),
-                                ),
-                              );
-                            },
-                          ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _statusCard({
-    required String title,
-    required String value,
-    required IconData icon,
-  }) {
-    return Container(
-      padding:
-          const EdgeInsets.all(
-        10,
-      ),
-      decoration:
-          BoxDecoration(
-        color:
-            Colors.white10,
-        borderRadius:
-            BorderRadius.circular(
-          14,
-        ),
-      ),
-      child: Column(
-        children: [
-          Icon(
-            icon,
-            size: 20,
-          ),
-          const SizedBox(
-            height: 4,
-          ),
-          Text(
-            value,
-            style:
-                const TextStyle(
-              fontSize: 18,
-              fontWeight:
-                  FontWeight.bold,
+              ],
             ),
           ),
-          Text(
-            title,
-            style:
-                const TextStyle(
-              color:
-                  Colors.white54,
-              fontSize: 9,
-              fontWeight:
-                  FontWeight.bold,
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -3062,47 +2098,23 @@ class _HomePageState extends State<HomePage>
     final found =
         _namaBarang.isNotEmpty;
 
-    final documented =
-        _nomorController
-                .text
-                .trim()
-                .isNotEmpty &&
-            _isDocumented(
-              _nomorController.text
-                  .trim(),
-            );
-
     return Positioned.fill(
       child: Container(
         color: Colors.black
-            .withValues(
-          alpha: 0.72,
-        ),
+            .withValues(alpha: 0.72),
         child: Center(
           child: Container(
-            width:
-                MediaQuery.of(context)
-                    .size
-                    .width -
-                40,
+            margin:
+                const EdgeInsets.all(24),
             padding:
-                const EdgeInsets
-                    .all(
-              20,
-            ),
-            decoration:
-                BoxDecoration(
+                const EdgeInsets.all(20),
+            decoration: BoxDecoration(
               color:
-                  const Color(
-                0xFF1C1C1C,
-              ),
+                  const Color(0xFF1C1C1C),
               borderRadius:
-                  BorderRadius.circular(
-                24,
-              ),
+                  BorderRadius.circular(24),
               border: Border.all(
-                color:
-                    Colors.white24,
+                color: Colors.white24,
               ),
             ),
             child: Column(
@@ -3115,31 +2127,24 @@ class _HomePageState extends State<HomePage>
                   color:
                       Colors.greenAccent,
                 ),
-                const SizedBox(
-                  height: 8,
-                ),
+                const SizedBox(height: 8),
                 const Text(
                   'NOMOR BARANG',
-                  style:
-                      TextStyle(
+                  style: TextStyle(
                     fontSize: 18,
                     fontWeight:
                         FontWeight.bold,
                   ),
                 ),
-                const SizedBox(
-                  height: 15,
-                ),
+                const SizedBox(height: 15),
                 TextField(
                   controller:
                       _nomorController,
                   focusNode:
                       _nomorFocus,
-                  autofocus:
-                      true,
+                  autofocus: true,
                   keyboardType:
-                      TextInputType
-                          .number,
+                      TextInputType.number,
                   inputFormatters: [
                     FilteringTextInputFormatter
                         .digitsOnly,
@@ -3156,10 +2161,8 @@ class _HomePageState extends State<HomePage>
                   ),
                   decoration:
                       InputDecoration(
-                    hintText:
-                        '03',
-                    filled:
-                        true,
+                    hintText: '01',
+                    filled: true,
                     fillColor:
                         Colors.white10,
                     border:
@@ -3172,66 +2175,66 @@ class _HomePageState extends State<HomePage>
                     ),
                   ),
                 ),
-                const SizedBox(
-                  height: 12,
+                const SizedBox(height: 12),
+                AnimatedSwitcher(
+                  duration:
+                      const Duration(
+                    milliseconds: 150,
+                  ),
+                  child: found
+                      ? Text(
+                          _namaBarang,
+                          key:
+                              const ValueKey(
+                            'found',
+                          ),
+                          textAlign:
+                              TextAlign.center,
+                          style:
+                              const TextStyle(
+                            color: Colors
+                                .greenAccent,
+                            fontSize: 18,
+                            fontWeight:
+                                FontWeight
+                                    .bold,
+                          ),
+                        )
+                      : _nomorController
+                              .text
+                              .isNotEmpty
+                          ? const Text(
+                              'Nomor tidak ditemukan di Excel',
+                              key:
+                                  ValueKey(
+                                'notfound',
+                              ),
+                              textAlign:
+                                  TextAlign
+                                      .center,
+                              style:
+                                  TextStyle(
+                                color: Colors
+                                    .redAccent,
+                                fontWeight:
+                                    FontWeight
+                                        .bold,
+                              ),
+                            )
+                          : const Text(
+                              'Masukkan nomor dari Excel',
+                              key:
+                                  ValueKey(
+                                'empty',
+                              ),
+                              style:
+                                  TextStyle(
+                                color: Colors
+                                    .white54,
+                              ),
+                            ),
                 ),
-                if (found)
-                  Text(
-                    _namaBarang,
-                    textAlign:
-                        TextAlign.center,
-                    style:
-                        const TextStyle(
-                      color:
-                          Colors.greenAccent,
-                      fontSize: 18,
-                      fontWeight:
-                          FontWeight.bold,
-                    ),
-                  )
-                else if (_nomorController
-                    .text
-                    .isNotEmpty)
-                  const Text(
-                    'Nomor tidak ditemukan di Excel',
-                    textAlign:
-                        TextAlign.center,
-                    style:
-                        TextStyle(
-                      color:
-                          Colors.redAccent,
-                      fontWeight:
-                          FontWeight.bold,
-                    ),
-                  )
-                else
-                  const Text(
-                    'Masukkan nomor dari Excel',
-                    style:
-                        TextStyle(
-                      color:
-                          Colors.white54,
-                    ),
-                  ),
-                if (documented) ...[
-                  const SizedBox(
-                    height: 8,
-                  ),
-                  const Text(
-                    '✓ SUDAH DIDOKUMENTASIKAN',
-                    style:
-                        TextStyle(
-                      color:
-                          Colors.orangeAccent,
-                      fontWeight:
-                          FontWeight.bold,
-                      fontSize: 12,
-                    ),
-                  ),
-                ],
-                const SizedBox(
-                  height: 18,
-                ),
+                const SizedBox(height: 18),
                 Row(
                   children: [
                     Expanded(
@@ -3251,19 +2254,24 @@ class _HomePageState extends State<HomePage>
                     Expanded(
                       child:
                           FilledButton(
-                        onPressed:
-                            found
-                                ? () {
-                                    setState(() {
-                                      _numberEditorOpen =
-                                          false;
-                                    });
+                        onPressed: () {
+                          if (_namaBarang
+                              .isEmpty) {
+                            _showMessage(
+                              'Nomor tidak ditemukan.',
+                            );
+                            return;
+                          }
 
-                                    FocusScope.of(
-                                      context,
-                                    ).unfocus();
-                                  }
-                                : null,
+                          setState(() {
+                            _numberEditorOpen =
+                                false;
+                          });
+
+                          FocusScope.of(
+                            context,
+                          ).unfocus();
+                        },
                         child:
                             const Text(
                           'PILIH',
@@ -3285,52 +2293,29 @@ class _HomePageState extends State<HomePage>
       child: IgnorePointer(
         child: Container(
           color: Colors.black
-              .withValues(
-            alpha: 0.32,
-          ),
-          child: Center(
+              .withValues(alpha: 0.25),
+          child: const Center(
             child: Column(
               mainAxisSize:
                   MainAxisSize.min,
               children: [
-                const SizedBox(
-                  width: 54,
-                  height: 54,
+                SizedBox(
+                  width: 52,
+                  height: 52,
                   child:
                       CircularProgressIndicator(
                     strokeWidth: 4,
                   ),
                 ),
-                const SizedBox(
-                  height: 14,
-                ),
-                const Text(
+                SizedBox(height: 12),
+                Text(
                   'MENYIMPAN FOTO...',
-                  style:
-                      TextStyle(
+                  style: TextStyle(
                     fontWeight:
                         FontWeight.bold,
                     letterSpacing: 1,
                   ),
                 ),
-                if (_timerSeconds >
-                    0)
-                  Padding(
-                    padding:
-                        const EdgeInsets
-                            .only(
-                      top: 8,
-                    ),
-                    child: Text(
-                      'Timer aktif: '
-                      '$_timerSeconds detik',
-                      style:
-                          const TextStyle(
-                        color:
-                            Colors.white54,
-                      ),
-                    ),
-                  ),
               ],
             ),
           ),
@@ -3339,9 +2324,7 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  void _showMessage(
-    String message,
-  ) {
+  void _showMessage(String message) {
     if (!mounted) {
       return;
     }
@@ -3350,12 +2333,415 @@ class _HomePageState extends State<HomePage>
       ..hideCurrentSnackBar()
       ..showSnackBar(
         SnackBar(
-          content:
-              Text(message),
+          content: Text(message),
           behavior:
               SnackBarBehavior.floating,
         ),
       );
+  }
+}
+
+class PhotoGalleryPage extends StatefulWidget {
+  const PhotoGalleryPage({
+    super.key,
+  });
+
+  @override
+  State<PhotoGalleryPage> createState() =>
+      _PhotoGalleryPageState();
+}
+
+class _PhotoGalleryPageState
+    extends State<PhotoGalleryPage> {
+  List<File> _photos = [];
+
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _loadPhotos();
+  }
+
+  Future<Directory> _photoDirectory() async {
+    final directory = Directory(
+      '/storage/emulated/0/'
+      'Dokumentasi Barang Pecah',
+    );
+
+    if (!await directory.exists()) {
+      await directory.create(
+        recursive: true,
+      );
+    }
+
+    return directory;
+  }
+
+  Future<void> _loadPhotos() async {
+    try {
+      final directory =
+          await _photoDirectory();
+
+      final entities =
+          await directory.list().toList();
+
+      final files = entities
+          .whereType<File>()
+          .where(
+            (file) {
+              final lower =
+                  file.path.toLowerCase();
+
+              return lower.endsWith('.jpg') ||
+                  lower.endsWith('.jpeg') ||
+                  lower.endsWith('.png');
+            },
+          )
+          .toList();
+
+      files.sort(
+        (a, b) {
+          final aTime =
+              a.statSync().modified;
+
+          final bTime =
+              b.statSync().modified;
+
+          return bTime.compareTo(aTime);
+        },
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _photos = files;
+        _loading = false;
+      });
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _photos = [];
+          _loading = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _deletePhoto(
+    File file,
+  ) async {
+    final confirm =
+        await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title:
+              const Text('Hapus foto?'),
+          content: Text(
+            file.path.split('/').last,
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.pop(
+                  context,
+                  false,
+                );
+              },
+              child:
+                  const Text('BATAL'),
+            ),
+            FilledButton(
+              onPressed: () {
+                Navigator.pop(
+                  context,
+                  true,
+                );
+              },
+              child:
+                  const Text('HAPUS'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirm != true) {
+      return;
+    }
+
+    try {
+      await file.delete();
+
+      await _loadPhotos();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(
+          SnackBar(
+            content: Text(
+              'Gagal menghapus foto: $e',
+            ),
+          ),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        title: Text(
+          'GALERI FOTO (${_photos.length})',
+          style: const TextStyle(
+            fontSize: 16,
+            fontWeight:
+                FontWeight.bold,
+          ),
+        ),
+        actions: [
+          IconButton(
+            onPressed: _loadPhotos,
+            icon:
+                const Icon(Icons.refresh),
+          ),
+        ],
+      ),
+      body: _loading
+          ? const Center(
+              child:
+                  CircularProgressIndicator(),
+            )
+          : _photos.isEmpty
+              ? const Center(
+                  child: Column(
+                    mainAxisSize:
+                        MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons
+                            .photo_library_outlined,
+                        size: 70,
+                        color:
+                            Colors.white38,
+                      ),
+                      SizedBox(height: 14),
+                      Text(
+                        'Belum ada foto',
+                        style: TextStyle(
+                          color:
+                              Colors.white70,
+                          fontSize: 17,
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+              : RefreshIndicator(
+                  onRefresh: _loadPhotos,
+                  child: GridView.builder(
+                    padding:
+                        const EdgeInsets.all(
+                      5,
+                    ),
+                    physics:
+                        const AlwaysScrollableScrollPhysics(),
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 3,
+                      crossAxisSpacing: 4,
+                      mainAxisSpacing: 4,
+                    ),
+                    itemCount:
+                        _photos.length,
+                    itemBuilder:
+                        (context, index) {
+                      final file =
+                          _photos[index];
+
+                      return GestureDetector(
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) =>
+                                  PhotoViewerPage(
+                                photos:
+                                    _photos,
+                                initialIndex:
+                                    index,
+                              ),
+                            ),
+                          );
+                        },
+                        onLongPress: () {
+                          _deletePhoto(file);
+                        },
+                        child: Hero(
+                          tag: file.path,
+                          child: Image.file(
+                            file,
+                            fit:
+                                BoxFit.cover,
+                            errorBuilder:
+                                (
+                              context,
+                              error,
+                              stackTrace,
+                            ) {
+                              return Container(
+                                color:
+                                    Colors.white10,
+                                child:
+                                    const Icon(
+                                  Icons
+                                      .broken_image,
+                                  color: Colors
+                                      .white54,
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+    );
+  }
+}
+
+class PhotoViewerPage
+    extends StatefulWidget {
+  final List<File> photos;
+
+  final int initialIndex;
+
+  const PhotoViewerPage({
+    super.key,
+    required this.photos,
+    required this.initialIndex,
+  });
+
+  @override
+  State<PhotoViewerPage> createState() =>
+      _PhotoViewerPageState();
+}
+
+class _PhotoViewerPageState
+    extends State<PhotoViewerPage> {
+  late PageController _pageController;
+
+  late int _currentIndex;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _currentIndex =
+        widget.initialIndex;
+
+    _pageController =
+        PageController(
+      initialPage: _currentIndex,
+    );
+  }
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final file =
+        widget.photos[_currentIndex];
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        title: Text(
+          '${_currentIndex + 1} / '
+          '${widget.photos.length}',
+          style: const TextStyle(
+            fontSize: 14,
+          ),
+        ),
+      ),
+      body: PageView.builder(
+        controller: _pageController,
+        itemCount: widget.photos.length,
+        onPageChanged: (index) {
+          setState(() {
+            _currentIndex = index;
+          });
+        },
+        itemBuilder:
+            (context, index) {
+          final image =
+              widget.photos[index];
+
+          return InteractiveViewer(
+            minScale: 0.8,
+            maxScale: 4.0,
+            child: Center(
+              child: Hero(
+                tag: image.path,
+                child: Image.file(
+                  image,
+                  fit: BoxFit.contain,
+                  errorBuilder: (
+                    context,
+                    error,
+                    stackTrace,
+                  ) {
+                    return const Icon(
+                      Icons.broken_image,
+                      size: 70,
+                      color: Colors.white54,
+                    );
+                  },
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+      bottomNavigationBar:
+          SafeArea(
+        child: Container(
+          padding:
+              const EdgeInsets.fromLTRB(
+            12,
+            8,
+            12,
+            10,
+          ),
+          color: Colors.black,
+          child: Text(
+            file.path.split('/').last,
+            maxLines: 2,
+            overflow:
+                TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: Colors.white70,
+              fontSize: 12,
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -3366,14 +2752,10 @@ class _GridPainter
     Canvas canvas,
     Size size,
   ) {
-    final paint =
-        Paint()
-          ..color =
-              Colors.white
-                  .withValues(
-            alpha: 0.35,
-          )
-          ..strokeWidth = 1;
+    final paint = Paint()
+      ..color = Colors.white
+          .withValues(alpha: 0.35)
+      ..strokeWidth = 1;
 
     final thirdWidth =
         size.width / 3;
@@ -3382,10 +2764,7 @@ class _GridPainter
         size.height / 3;
 
     canvas.drawLine(
-      Offset(
-        thirdWidth,
-        0,
-      ),
+      Offset(thirdWidth, 0),
       Offset(
         thirdWidth,
         size.height,
