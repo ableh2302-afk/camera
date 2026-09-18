@@ -56,7 +56,6 @@ class _CameraHomePageState extends State<CameraHomePage>
   int _cameraIndex = 0;
   bool _initializing = true;
   bool _saving = false;
-  bool _importingExcel = false;
   int _cameraInitToken = 0;
   bool _flashOn = false;
   bool _gridOn = false;
@@ -129,15 +128,15 @@ class _CameraHomePageState extends State<CameraHomePage>
   String get _ratioText => switch (_ratio) {
         CameraRatio.r16x9 => '16:9',
         CameraRatio.r1x1 => '1:1',
-        CameraRatio.r4x3 => '4:3',
         CameraRatio.full => 'FULL',
+        CameraRatio.r4x3 => '4:3',
       };
 
   double get _frameRatio => switch (_ratio) {
         CameraRatio.r16x9 => 16 / 9,
         CameraRatio.r1x1 => 1,
-        CameraRatio.r4x3 => 4 / 3,
         CameraRatio.full => 0,
+        CameraRatio.r4x3 => 4 / 3,
       };
 
   Future<void> _initializeCamera() async {
@@ -214,8 +213,6 @@ class _CameraHomePageState extends State<CameraHomePage>
   }
 
   Future<void> _importExcel() async {
-    if (_importingExcel) return;
-    if (mounted) setState(() => _importingExcel = true);
     try {
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
@@ -246,8 +243,6 @@ class _CameraHomePageState extends State<CameraHomePage>
       _message('Berhasil import ${imported.length} data barang.');
     } catch (e) {
       _message('Gagal membaca Excel: $e');
-    } finally {
-      if (mounted) setState(() => _importingExcel = false);
     }
   }
 
@@ -320,31 +315,6 @@ class _CameraHomePageState extends State<CameraHomePage>
     } catch (_) {}
   }
 
-  Future<File> _preparePhotoForRatio(String path) async {
-    if (_ratio == CameraRatio.full) return File(path);
-    final bytes = await File(path).readAsBytes();
-    final source = img.decodeImage(bytes);
-    if (source == null) return File(path);
-
-    final targetRatio = _frameRatio;
-    final sourceRatio = source.width / source.height;
-    var cropW = source.width;
-    var cropH = source.height;
-    if (sourceRatio > targetRatio) {
-      cropW = (source.height * targetRatio).round();
-    } else if (sourceRatio < targetRatio) {
-      cropH = (source.width / targetRatio).round();
-    }
-    cropW = cropW.clamp(1, source.width);
-    cropH = cropH.clamp(1, source.height);
-    final x = ((source.width - cropW) / 2).round();
-    final y = ((source.height - cropH) / 2).round();
-    final cropped = img.copyCrop(source, x: x, y: y, width: cropW, height: cropH);
-    final outPath = '${path}_ratio.jpg';
-    await File(outPath).writeAsBytes(img.encodeJpg(cropped, quality: 95), flush: true);
-    return File(outPath);
-  }
-
   Future<void> _takePhoto() async {
     if (_saving) return;
     final camera = _camera;
@@ -360,6 +330,17 @@ class _CameraHomePageState extends State<CameraHomePage>
     try {
       final photo = await camera.takePicture();
       final dir = await _photoDirectory();
+      File sourceFile = File(photo.path);
+      if (_ratio != CameraRatio.full) {
+        final decoded = img.decodeImage(await sourceFile.readAsBytes());
+        if (decoded != null) {
+          final oriented = img.bakeOrientation(decoded);
+          final cropped = _cropToRatio(oriented, _frameRatio);
+          final temp = File('${dir.path}/.camera_temp_${DateTime.now().microsecondsSinceEpoch}.jpg');
+          await temp.writeAsBytes(img.encodeJpg(cropped, quality: 95), flush: true);
+          sourceFile = temp;
+        }
+      }
       final entered = _numberController.text.trim();
       final matched = _findBarang(entered);
       String baseName;
@@ -370,11 +351,10 @@ class _CameraHomePageState extends State<CameraHomePage>
       } else {
         baseName = 'FOTO_${DateTime.now().millisecondsSinceEpoch}';
       }
-      final prepared = await _preparePhotoForRatio(photo.path);
       final target = await _uniqueFile(dir, baseName);
-      await prepared.copy(target.path);
-      if (prepared.path != photo.path) {
-        try { await prepared.delete(); } catch (_) {}
+      await sourceFile.copy(target.path);
+      if (sourceFile.path.contains('.camera_temp_')) {
+        try { await sourceFile.delete(); } catch (_) {}
       }
       await _refreshPhotos();
       if (mounted) {
@@ -385,6 +365,20 @@ class _CameraHomePageState extends State<CameraHomePage>
       if (mounted) setState(() => _saving = false);
       _message('Gagal mengambil foto: $e');
     }
+  }
+
+  img.Image _cropToRatio(img.Image source, double ratio) {
+    if (ratio <= 0) return source;
+    final current = source.width / source.height;
+    if ((current - ratio).abs() < 0.01) return source;
+    if (current > ratio) {
+      final newWidth = math.max(1, (source.height * ratio).round());
+      final x = ((source.width - newWidth) / 2).round();
+      return img.copyCrop(source, x: x, y: 0, width: newWidth, height: source.height);
+    }
+    final newHeight = math.max(1, (source.width / ratio).round());
+    final y = ((source.height - newHeight) / 2).round();
+    return img.copyCrop(source, x: 0, y: y, width: source.width, height: newHeight);
   }
 
   Future<void> _countdown() async {
@@ -436,20 +430,22 @@ class _CameraHomePageState extends State<CameraHomePage>
                   Wrap(
                     spacing: 8,
                     children: CameraRatio.values.map((r) => ChoiceChip(
-                      label: Text(switch (r) { CameraRatio.r4x3 => '4:3', CameraRatio.r16x9 => '16:9', CameraRatio.r1x1 => '1:1', CameraRatio.full => 'FULL'}),
+                      label: Text(switch (r) {
+                        CameraRatio.r4x3 => '4:3',
+                        CameraRatio.r16x9 => '16:9',
+                        CameraRatio.r1x1 => '1:1',
+                        CameraRatio.full => 'FULL',
+                      }),
                       selected: _ratio == r,
-                      onSelected: (_) async {
-                        if (_ratio == r) return;
+                      onSelected: (_) {
                         setState(() => _ratio = r);
                         setSheet(() {});
-                        await _savePreferences();
+                        _savePreferences();
                       },
                     )).toList(),
                   ),
                   const SizedBox(height: 18),
-                  const Text('Resolusi capture', style: TextStyle(fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 4),
-                  const Text('Rasio di atas mengubah bentuk frame kamera. Resolusi menentukan kualitas/ukuran hasil foto.', style: TextStyle(color: Colors.black54, fontSize: 12)),
+                  const Text('Resolusi', style: TextStyle(fontWeight: FontWeight.bold)),
                   DropdownButtonFormField<ResolutionPreset>(
                     value: _resolution,
                     items: const [
@@ -556,20 +552,10 @@ class _CameraHomePageState extends State<CameraHomePage>
   Widget _cameraPreview() {
     final camera = _camera;
     if (camera == null || !camera.value.isInitialized) {
-      return const ColoredBox(
-        color: Colors.black,
-        child: Center(
-          child: Icon(Icons.photo_camera_outlined, color: Colors.white38, size: 58),
-        ),
-      );
+      return const Center(child: CircularProgressIndicator(color: Colors.white));
     }
-
     final previewSize = camera.value.previewSize;
     if (previewSize == null) return CameraPreview(camera);
-
-    // CameraPreview dari plugin camera pada perangkat portrait biasanya
-    // mengembalikan ukuran landscape. Lebar/tingginya dibalik agar orientasi
-    // preview benar tanpa meregangkan gambar.
     final preview = FittedBox(
       fit: BoxFit.cover,
       alignment: Alignment.center,
@@ -579,40 +565,14 @@ class _CameraHomePageState extends State<CameraHomePage>
         child: CameraPreview(camera),
       ),
     );
-
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        if (_ratio == CameraRatio.full) {
-          return ClipRect(
-            child: SizedBox.expand(child: preview),
-          );
-        }
-
-        // Frame kamera benar-benar berubah sesuai rasio.
-        // 4:3 dan 16:9 mempertahankan lebar maksimum yang tersedia;
-        // 1:1 menjadi persegi. Area di luar frame tetap hitam seperti
-        // aplikasi kamera pada umumnya.
-        final maxW = constraints.maxWidth;
-        final maxH = constraints.maxHeight;
-        final ratio = _frameRatio;
-        double frameW = maxW;
-        double frameH = frameW / ratio;
-        if (frameH > maxH) {
-          frameH = maxH;
-          frameW = frameH * ratio;
-        }
-
-        return ColoredBox(
-          color: Colors.black,
-          child: Center(
-            child: SizedBox(
-              width: frameW,
-              height: frameH,
-              child: ClipRect(child: SizedBox.expand(child: preview)),
-            ),
-          ),
-        );
-      },
+    if (_ratio == CameraRatio.full) {
+      return ClipRect(child: SizedBox.expand(child: preview));
+    }
+    return Center(
+      child: AspectRatio(
+        aspectRatio: _frameRatio,
+        child: ClipRect(child: SizedBox.expand(child: preview)),
+      ),
     );
   }
 
@@ -683,31 +643,6 @@ class _CameraHomePageState extends State<CameraHomePage>
                 children: [
                   ColoredBox(color: Colors.black, child: _cameraPreview()),
                   _gridOverlay(),
-                  Positioned(
-                    top: 12,
-                    right: 12,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: Colors.black.withValues(alpha: .55),
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      child: Text(
-                        _ratioText,
-                        style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w800),
-                      ),
-                    ),
-                  ),
-                  if (_importingExcel)
-                    Positioned(
-                      top: 12,
-                      left: 12,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                        decoration: BoxDecoration(color: Colors.black.withValues(alpha: .72), borderRadius: BorderRadius.circular(20)),
-                        child: const Row(mainAxisSize: MainAxisSize.min, children: [SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)), SizedBox(width: 8), Text('IMPORT EXCEL...', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w700))]),
-                      ),
-                    ),
                   Positioned(
                     left: 12,
                     right: 12,
@@ -1419,13 +1354,9 @@ class _PhotoEditorPageState extends State<PhotoEditorPage> {
   }
 
   void _drawCircleOutline(img.Image image, int cx, int cy, int radius, img.Color color, int thickness) {
-    final outer = radius;
-    final inner = math.max(0, radius - math.max(1, thickness));
-    for (var y = math.max(0, cy - outer); y <= math.min(image.height - 1, cy + outer); y++) {
-      for (var x = math.max(0, cx - outer); x <= math.min(image.width - 1, cx + outer); x++) {
-        final d = math.sqrt(math.pow(x - cx, 2) + math.pow(y - cy, 2));
-        if (d >= inner && d <= outer) image.setPixel(x, y, color);
-      }
+    final t = math.max(1, thickness);
+    for (var r = radius; r >= math.max(1, radius - t + 1); r--) {
+      img.drawCircle(image, x: cx, y: cy, radius: r, color: color);
     }
   }
 
@@ -1631,30 +1562,7 @@ class _PhotoEditorPageState extends State<PhotoEditorPage> {
         return Column(children: [
           SegmentedButton<EraseMode>(segments: const [ButtonSegment(value: EraseMode.auto, label: Text('AUTO'), icon: Icon(Icons.auto_fix_high)), ButtonSegment(value: EraseMode.manual, label: Text('MANUAL'), icon: Icon(Icons.brush_outlined))], selected: {_eraseMode}, onSelectionChanged: (s) => setState(() => _eraseMode = s.first)),
           const SizedBox(height: 8),
-          if (_eraseMode == EraseMode.auto && _autoErasePoint != null)
-            Align(
-              alignment: Alignment.centerRight,
-              child: TextButton.icon(
-                onPressed: () => setState(() => _autoErasePoint = null),
-                icon: const Icon(Icons.clear, size: 17),
-                label: const Text('BATALKAN TANDA'),
-              ),
-            ),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-            decoration: BoxDecoration(
-              color: Colors.blue.withValues(alpha: .14),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: Colors.blue.withValues(alpha: .35)),
-            ),
-            child: Text(
-              _eraseMode == EraseMode.auto
-                  ? 'ERASER AKTIF • Tap objek. Lingkaran penanda tetap tampil sampai objek diproses.'
-                  : 'ERASER MANUAL AKTIF • Gambar pada objek lalu tekan HAPUS AREA.',
-              style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600),
-            ),
-          ),
+          Text(_eraseMode == EraseMode.auto ? 'Tap objek yang ingin dihapus. Aplikasi akan memilih area otomatis.' : 'Gambar pada objek yang ingin dihapus.', style: const TextStyle(color: Colors.white70, fontSize: 12)),
           if (_eraseMode == EraseMode.manual) Row(children: [const Icon(Icons.brush, color: Colors.white70), Expanded(child: Slider(value: _brush, min: 12, max: 100, onChanged: (v) => setState(() => _brush = v))), Text('${_brush.round()}', style: const TextStyle(color: Colors.white70))]),
           if (_eraseMode == EraseMode.manual) FilledButton.icon(onPressed: _busy ? null : _applyManualErase, icon: const Icon(Icons.auto_fix_high), label: const Text('HAPUS AREA')),
         ]);
@@ -1673,7 +1581,26 @@ class _PhotoEditorPageState extends State<PhotoEditorPage> {
         ]);
       case EditTool.annotate:
         return Column(children: [
-          SizedBox(height: 44, child: ListView(scrollDirection: Axis.horizontal, children: AnnotationMode.values.map((m) => Padding(padding: const EdgeInsets.only(right: 7), child: ChoiceChip(label: Text(switch (m) { AnnotationMode.circle => 'LINGKARAN', AnnotationMode.rectangle => 'KOTAK', AnnotationMode.arrow => 'PANAH', AnnotationMode.text => 'TEKS', AnnotationMode.number => 'NOMOR' }), selected: _annotationMode == m, onSelected: (_) => setState(() => _annotationMode = m)))).toList())),
+          SizedBox(
+            height: 44,
+            child: ListView(
+              scrollDirection: Axis.horizontal,
+              children: AnnotationMode.values.map((m) => Padding(
+                padding: const EdgeInsets.only(right: 7),
+                child: ChoiceChip(
+                  label: Text(switch (m) {
+                    AnnotationMode.circle => 'LINGKARAN',
+                    AnnotationMode.rectangle => 'KOTAK',
+                    AnnotationMode.arrow => 'PANAH',
+                    AnnotationMode.text => 'TEKS',
+                    AnnotationMode.number => 'NOMOR',
+                  }),
+                  selected: _annotationMode == m,
+                  onSelected: (_) => setState(() => _annotationMode = m),
+                ),
+              )).toList(),
+            ),
+          ),
           const SizedBox(height: 6),
           const Text('Tandai bagian barang yang rusak sebelum menyimpan.', style: TextStyle(color: Colors.white70, fontSize: 12)),
           Row(children: [Expanded(child: OutlinedButton.icon(onPressed: _marks.isEmpty ? null : () => setState(() => _marks.removeLast()), icon: const Icon(Icons.undo), label: const Text('HAPUS TANDA TERAKHIR'))), const SizedBox(width: 8), OutlinedButton.icon(onPressed: _marks.isEmpty ? null : () => setState(() => _marks.clear()), icon: const Icon(Icons.clear_all), label: const Text('BERSIHKAN'))]),
