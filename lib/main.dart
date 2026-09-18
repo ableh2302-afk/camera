@@ -3,7 +3,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:camera/camera.dart';
-import 'package:excel/excel.dart';
+import 'package:excel/excel.dart' as excel;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -240,7 +240,7 @@ class _HomePageState extends State<HomePage>
       final file = File(result.files.single.path!);
       final bytes = await file.readAsBytes();
 
-      final workbook = Excel.decodeBytes(bytes);
+      final workbook = excel.Excel.decodeBytes(bytes);
 
       if (workbook.tables.isEmpty) {
         _showMessage('Excel tidak memiliki sheet.');
