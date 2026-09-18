@@ -1,4 +1,3 @@
-```yaml
 name: CAMERA
 description: Kamera dokumentasi barang pecah offline berbasis Excel.
 publish_to: "none"
