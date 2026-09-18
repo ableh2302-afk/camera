@@ -1242,7 +1242,7 @@ class _PhotoEditorPageState extends State<PhotoEditorPage> {
             (old.r * (1 - alpha) + fill.r * alpha).round(),
             (old.g * (1 - alpha) + fill.g * alpha).round(),
             (old.b * (1 - alpha) + fill.b * alpha).round(),
-            old.a,
+            old.a.toInt(),
           ));
         }
       }
@@ -1322,7 +1322,7 @@ class _PhotoEditorPageState extends State<PhotoEditorPage> {
         final cx = ((sx + ex) / 2).round();
         final cy = ((sy + ey) / 2).round();
         final radius = (math.max((ex - sx).abs(), (ey - sy).abs()) / 2).round();
-        img.drawCircle(image, x: cx, y: cy, radius: math.max(8, radius), color: color, thickness: thickness);
+        img.drawCircle(image, x: cx, y: cy, radius: math.max(8, radius).toInt(), color: color);
         break;
       case AnnotationMode.rectangle:
         img.drawRect(image, x1: math.min(sx, ex), y1: math.min(sy, ey), x2: math.max(sx, ex), y2: math.max(sy, ey), color: color, thickness: thickness);
@@ -1340,7 +1340,7 @@ class _PhotoEditorPageState extends State<PhotoEditorPage> {
         img.drawString(image, mark.text ?? '', font: img.arial24, x: sx, y: sy, color: color);
         break;
       case AnnotationMode.number:
-        img.drawCircle(image, x: sx, y: sy, radius: math.max(22, image.width ~/ 70), color: color, thickness: thickness);
+        img.drawCircle(image, x: sx, y: sy, radius: math.max(22, image.width ~/ 70), color: color);
         img.drawString(image, mark.text ?? '1', font: img.arial24, x: sx - 7, y: sy - 12, color: img.ColorRgb8(255, 255, 255));
         break;
     }
@@ -1531,7 +1531,28 @@ class _PhotoEditorPageState extends State<PhotoEditorPage> {
         ]);
       case EditTool.annotate:
         return Column(children: [
-          SizedBox(height: 44, child: ListView(scrollDirection: Axis.horizontal, children: AnnotationMode.values.map((m) => Padding(padding: const EdgeInsets.only(right: 7), child: ChoiceChip(label: Text(switch (m) { AnnotationMode.circle => 'LINGKARAN', AnnotationMode.rectangle => 'KOTAK', AnnotationMode.arrow => 'PANAH', AnnotationMode.text => 'TEKS', AnnotationMode.number => 'NOMOR' }), selected: _annotationMode == m, onSelected: (_) => setState(() => _annotationMode = m))).toList()))),
+          SizedBox(
+            height: 44,
+            child: ListView(
+              scrollDirection: Axis.horizontal,
+              children: AnnotationMode.values.map((m) {
+                return Padding(
+                  padding: const EdgeInsets.only(right: 7),
+                  child: ChoiceChip(
+                    label: Text(switch (m) {
+                      AnnotationMode.circle => 'LINGKARAN',
+                      AnnotationMode.rectangle => 'KOTAK',
+                      AnnotationMode.arrow => 'PANAH',
+                      AnnotationMode.text => 'TEKS',
+                      AnnotationMode.number => 'NOMOR',
+                    }),
+                    selected: _annotationMode == m,
+                    onSelected: (_) => setState(() => _annotationMode = m),
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
           const SizedBox(height: 6),
           const Text('Tandai bagian barang yang rusak sebelum menyimpan.', style: TextStyle(color: Colors.white70, fontSize: 12)),
           Row(children: [Expanded(child: OutlinedButton.icon(onPressed: _marks.isEmpty ? null : () => setState(() => _marks.removeLast()), icon: const Icon(Icons.undo), label: const Text('HAPUS TANDA TERAKHIR'))), const SizedBox(width: 8), OutlinedButton.icon(onPressed: _marks.isEmpty ? null : () => setState(() => _marks.clear()), icon: const Icon(Icons.clear_all), label: const Text('BERSIHKAN'))]),
