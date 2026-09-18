@@ -1,7 +1,7 @@
 ```yaml
 name: Build APK
 
-on:
+"on":
   push:
     branches:
       - main
