@@ -1,49 +1,33 @@
 ```yaml
 name: Build APK
 
-"on":
-  push:
-    branches:
-      - main
-      - master
+on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build Android APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout source code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Java 17
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
-          cache: gradle
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: "3.35.5"
           channel: stable
-          cache: true
 
-      - name: Check Flutter version
-        run: flutter --version
-
-      - name: Get Flutter dependencies
+      - name: Install dependencies
         run: flutter pub get
 
-      - name: Clean Flutter project
-        run: flutter clean
-
-      - name: Get dependencies again
-        run: flutter pub get
-
-      - name: Build release APK
+      - name: Build APK
         run: flutter build apk --release
 
       - name: Upload APK
@@ -51,5 +35,4 @@ jobs:
         with:
           name: dokumentasi-barang-pecah-apk
           path: build/app/outputs/flutter-apk/app-release.apk
-          if-no-files-found: error
 ```
