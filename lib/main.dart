@@ -164,7 +164,7 @@ class _CameraHomePageState extends State<CameraHomePage>
         CameraRatio.r4x3 => 4 / 3,
       };
 
-  Future<void> _initializeCamera() async {
+  Future<void> _initializeCamera({bool keepCurrent = true}) async {
     if (cameras.isEmpty || _cameraBusy) return;
     _cameraBusy = true;
     final token = ++_cameraInitToken;
@@ -180,23 +180,40 @@ class _CameraHomePageState extends State<CameraHomePage>
       if (_flashOn) {
         try { await controller.setFlashMode(FlashMode.torch); } catch (_) {}
       }
-      _minZoom = await controller.getMinZoomLevel();
-      _maxZoom = await controller.getMaxZoomLevel();
-      _zoom = _zoom.clamp(_minZoom, _maxZoom);
-      await controller.setZoomLevel(_zoom);
+      final newMinZoom = await controller.getMinZoomLevel();
+      final newMaxZoom = await controller.getMaxZoomLevel();
+      final newZoom = _zoom.clamp(newMinZoom, newMaxZoom).toDouble();
+      try { await controller.setZoomLevel(newZoom); } catch (_) {}
       try { await controller.setExposureOffset(_exposure.clamp(-2.0, 2.0)); } catch (_) {}
+
       if (!mounted || token != _cameraInitToken) {
         await controller.dispose();
         return;
       }
+
       final previous = _camera;
-      setState(() { _camera = controller; _switchingCamera = false; });
-      await previous?.dispose();
+      setState(() {
+        _minZoom = newMinZoom;
+        _maxZoom = newMaxZoom;
+        _zoom = newZoom;
+        _camera = controller;
+        _switchingCamera = false;
+        _initializing = false;
+      });
+
+      // Saat pindah kamera, controller lama baru dilepas setelah controller baru
+      // siap sehingga preview tidak sempat menjadi layar hitam.
+      if (previous != null && previous != controller) {
+        await previous.dispose();
+      }
     } catch (e) {
       await controller.dispose();
       if (mounted) {
         setState(() => _switchingCamera = false);
-        _message('Kamera gagal dibuka: $e');
+        // Jika kamera lama masih sehat, jangan menggantinya dengan layar error.
+        if (_camera == null || !_camera!.value.isInitialized) {
+          _message('Kamera gagal dibuka: $e');
+        }
       }
     } finally {
       _cameraBusy = false;
@@ -205,14 +222,24 @@ class _CameraHomePageState extends State<CameraHomePage>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.inactive || state == AppLifecycleState.paused) {
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
       ++_cameraInitToken;
       final camera = _camera;
       _camera = null;
+      _cameraBusy = false;
       camera?.dispose();
       if (mounted) setState(() {});
     } else if (state == AppLifecycleState.resumed) {
-      if (_camera == null) _initializeCamera();
+      // Beri Android sedikit waktu untuk mengembalikan Surface/Camera HAL setelah
+      // layar menyala. Inisialisasi dijalankan sekali dan tidak menampilkan loading
+      // panjang di atas preview.
+      Future<void>.delayed(const Duration(milliseconds: 80), () {
+        if (mounted && _camera == null && !_cameraBusy) {
+          _initializeCamera();
+        }
+      });
     }
   }
 
@@ -456,12 +483,14 @@ class _CameraHomePageState extends State<CameraHomePage>
   }
 
   Future<void> _switchCamera() async {
-    if (cameras.length < 2 || _cameraBusy) return;
-    setState(() { _cameraIndex = (_cameraIndex + 1) % cameras.length; _switchingCamera = true; });
-    final old = _camera;
-    _camera = null;
-    await old?.dispose();
-    await _initializeCamera();
+    if (cameras.length < 2 || _cameraBusy || _switchingCamera) return;
+    setState(() {
+      _cameraIndex = (_cameraIndex + 1) % cameras.length;
+      _switchingCamera = true;
+    });
+    // Jangan kosongkan/dispose preview lama di sini. _initializeCamera akan
+    // menyiapkan kamera baru terlebih dahulu, lalu menukar controller secara atomik.
+    await _initializeCamera(keepCurrent: true);
   }
 
   Future<void> _toggleStabilizer() async {
@@ -623,38 +652,71 @@ class _CameraHomePageState extends State<CameraHomePage>
         color: Colors.black,
         alignment: Alignment.center,
         child: (_initializing || _switchingCamera)
-            ? const CircularProgressIndicator(color: Colors.white)
+            ? const SizedBox(width: 28, height: 28, child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white))
             : const Text('KAMERA TIDAK SIAP', style: TextStyle(color: Colors.white54, fontWeight: FontWeight.bold)),
       );
     }
+
     final ps = camera.value.previewSize;
     if (ps == null) return CameraPreview(camera);
-    // Preview selalu memenuhi seluruh layar. Rasio 4:3/16:9/1:1/FULL
-    // diterapkan pada hasil foto, bukan dengan memberi panel hitam di preview.
-    return SizedBox.expand(
-      child: ClipRect(
-        child: FittedBox(
-          fit: BoxFit.cover,
-          alignment: Alignment.center,
-          child: SizedBox(
-            width: ps.height,
-            height: ps.width,
-            child: CameraPreview(camera),
-          ),
-        ),
-      ),
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final screenW = constraints.maxWidth;
+        final screenH = constraints.maxHeight;
+        final ratio = _ratio == CameraRatio.full
+            ? (screenW / screenH)
+            : _frameRatio;
+
+        // Frame preview benar-benar berubah mengikuti pilihan rasio. Kita hitung
+        // ukuran frame terbesar yang masih muat di layar, lalu CameraPreview
+        // mengisi frame tersebut tanpa mengubah rasio frame.
+        double frameW = screenW;
+        double frameH = frameW / ratio;
+        if (frameH > screenH) {
+          frameH = screenH;
+          frameW = frameH * ratio;
+        }
+
+        final previewAspect = ps.height / ps.width;
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            const ColoredBox(color: Colors.black),
+            Center(
+              child: SizedBox(
+                width: frameW,
+                height: frameH,
+                child: ClipRect(
+                  child: FittedBox(
+                    fit: BoxFit.cover,
+                    alignment: Alignment.center,
+                    child: SizedBox(
+                      width: previewAspect >= 1 ? ps.height : ps.width,
+                      height: previewAspect >= 1 ? ps.width : ps.height,
+                      child: CameraPreview(camera),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            if (_gridOn)
+              Center(
+                child: IgnorePointer(
+                  child: SizedBox(
+                    width: frameW,
+                    height: frameH,
+                    child: CustomPaint(painter: GridPainter()),
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 
-  Widget _gridOverlay() {
-    if (!_gridOn) return const SizedBox.shrink();
-    return IgnorePointer(
-      child: CustomPaint(
-        painter: GridPainter(),
-        size: Size.infinite,
-      ),
-    );
-  }
+  Widget _gridOverlay() => const SizedBox.shrink();
 
   Widget _bottomBar() {
     return Container(
@@ -724,11 +786,11 @@ class _CameraHomePageState extends State<CameraHomePage>
               ),
             ),
             Positioned(
-              left: 10, right: 10, bottom: 124,
+              left: 14, right: 14, bottom: 174,
               child: Column(children: [
                 if (_barang.isNotEmpty || _numberController.text.isNotEmpty)
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                     decoration: BoxDecoration(color: Colors.black.withValues(alpha: .5), borderRadius: BorderRadius.circular(14)),
                     child: Text(_namaBarang.isNotEmpty ? '${_numberController.text} • $_namaBarang' : 'Nomor belum ditemukan', textAlign: TextAlign.center, style: TextStyle(color: _namaBarang.isNotEmpty ? Colors.white : Colors.amber, fontWeight: FontWeight.bold)),
                   ),
